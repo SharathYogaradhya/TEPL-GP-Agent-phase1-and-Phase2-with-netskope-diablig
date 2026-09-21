@@ -312,7 +312,14 @@ $netskopeAction = "Uninstall"
 # the plain (no-password) uninstall attempt is expected to fail and this
 # password is what the retry step actually relies on - applied via the
 # confirmed MSI PASSWORD property.
-$netskopeDisablePassword = "june@2026!@"
+#
+# Corrected in v12: the password is case-sensitive and was previously
+# stored as "june@2026!@" (lowercase j). The real-machine test run on
+# 2026-09-21 confirmed the password retry step failing with the same MSI
+# exit code (1602) as the plain attempt, which pointed at the password
+# itself rather than a deeper tamper-protection block - the customer then
+# confirmed the correct casing is "June@2026!@" (capital J).
+$netskopeDisablePassword = "June@2026!@"
 
 # Install certificates (skips any certificate already present in the store)
 Install-Certificates -trustedRootCertFilePath $trustedRootCertFilePath -personalCertFilePath $personalCertFilePath -decryptionCertFilePath $decryptionCertFilePath -secondDecryptionCertFilePath $secondDecryptionCertFilePath -certPassword $certPassword
