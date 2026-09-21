@@ -22,7 +22,6 @@ function Test-Administrator {
 function Install-Certificates {
     param (
         [string]$trustedRootCertFilePath,
-        #[string]$personalCertFilePath,
         [string]$decryptionCertFilePath,
         [string]$secondDecryptionCertFilePath, # New parameter for the second decryption certificate
         [string]$certPassword
@@ -72,10 +71,6 @@ function Install-Certificates {
             Write-Log "Trusted Root certificate file not found at path: $trustedRootCertFilePath"
             throw "Trusted Root certificate file not found."
         }
-       # if (-Not (Test-Path -Path $personalCertFilePath)) {
-        #    Write-Log "Personal certificate file not found at path: $personalCertFilePath"
-         #   throw "Personal certificate file not found."
-        #}
         if (-Not (Test-Path -Path $decryptionCertFilePath)) {
             Write-Log "Decryption certificate file not found at path: $decryptionCertFilePath"
             throw "Decryption certificate file not found."
@@ -87,12 +82,6 @@ function Install-Certificates {
 
         # Install trusted root certificate to Trusted Root store
         Install-Cert -certFilePath $trustedRootCertFilePath -storeName "Root" -storeLocation "LocalMachine" -certPassword $null
-
-        # Install personal certificate to Personal store (LocalMachine)
-       # Install-Cert -certFilePath $personalCertFilePath -storeName "My" -storeLocation "LocalMachine" -certPassword $certPassword
-
-        # Install personal certificate to Personal store (CurrentUser)
-      #  Install-Cert -certFilePath $personalCertFilePath -storeName "My" -storeLocation "CurrentUser" -certPassword $certPassword
 
         # Install decryption certificate to Trusted Root store
         Install-Cert -certFilePath $decryptionCertFilePath -storeName "Root" -storeLocation "LocalMachine" -certPassword $certPassword
@@ -106,17 +95,73 @@ function Install-Certificates {
     }
 }
 
+# Returns $true if a GlobalProtect uninstall registry entry can be found.
+# Replaces the Get-WmiObject Win32_Product check used through v2: Win32_Product
+# is a known slow, deprecated WMI class whose enumeration has the side effect
+# of triggering a repair-install scan of every MSI-installed application on
+# the machine. This uses the same registry-uninstall-key pattern already
+# proven for Netskope detection instead.
+function Test-GlobalProtectInstalled {
+    $uninstallKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($keyPath in $uninstallKeys) {
+        $entry = Get-ItemProperty -Path $keyPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*GlobalProtect*" }
+        if ($entry) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+# Polls a named condition (a script block returning $true/$false) instead of
+# a single fixed sleep. Used both to confirm the GlobalProtect registry entry
+# actually appears after install, and to confirm the PanGPS service actually
+# reaches the desired status after being restarted - purely local machine
+# state, not GlobalProtect's network/tunnel connectivity (that check stays in
+# Phase2, not here).
+function Wait-ForCondition {
+    param (
+        [scriptblock]$Condition,
+        [int]$MaxWaitSeconds = 60,
+        [int]$PollIntervalSeconds = 5
+    )
+
+    $elapsed = 0
+    while ($elapsed -le $MaxWaitSeconds) {
+        if (& $Condition) {
+            return $true
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+        $elapsed += $PollIntervalSeconds
+    }
+
+    return & $Condition
+}
+
 # Function to install GlobalProtect
 #
-# Changed in v2: the msiexec install now captures and checks the
-# installer's own exit code instead of assuming success right after
-# Start-Process returns. Previously, a failed GlobalProtect install would
-# still log "GlobalProtect installed successfully" and continue on to
-# restart the (non-functional) service - the script had no way to catch
-# that failure. Phase1's scope is unchanged otherwise: install certs and
-# the GP agent, and log the outcome - Portal/Prelogon configuration,
-# confirming GlobalProtect actually connects, and any Netskope handling
-# remain Phase2's responsibility, not Phase1's.
+# Changed in v3 (all local-machine-state checks - no GlobalProtect
+# network/tunnel connectivity check here, that remains Phase2's job):
+# - Replaced the Get-WmiObject Win32_Product "already installed" check with
+#   Test-GlobalProtectInstalled (registry-based - avoids Win32_Product's
+#   slowness and its side effect of triggering a repair scan of every
+#   installed MSI package on the machine).
+# - Replaced the fixed 45-second Start-Sleep after install with polling
+#   Test-GlobalProtectInstalled (via Wait-ForCondition) for up to 60 seconds,
+#   confirming the registry entry actually appeared instead of guessing a
+#   wait time.
+# - After Restart-Service, polls for the PanGPS service to actually reach
+#   "Running" (via Wait-ForCondition, up to 60 seconds) instead of assuming
+#   success right after the restart call returns.
+#
+# Carried over from v2: the msiexec install still captures and checks its
+# own exit code instead of assuming success right after Start-Process
+# returns.
 function Install-GlobalProtect {
     param (
         [string]$GlobalProtectInstallerPath
@@ -125,12 +170,7 @@ function Install-GlobalProtect {
     try {
         Write-Log "Installing GlobalProtect..."
 
-        # Check if GlobalProtect is already installed
-        $globalProtectInstalled = Get-WmiObject -Query "SELECT * FROM Win32_Product WHERE Name = 'GlobalProtect'" | ForEach-Object {
-            $_.Name -eq "GlobalProtect"
-        }
-
-        if ($globalProtectInstalled) {
+        if (Test-GlobalProtectInstalled) {
             Write-Log "GlobalProtect is already installed. Skipping installation."
         } else {
             # Run the GlobalProtect installer silently, capturing its exit code
@@ -141,14 +181,21 @@ function Install-GlobalProtect {
                 throw "GlobalProtect MSI install failed with exit code $($proc.ExitCode)."
             }
 
-            Start-Sleep -Seconds 45
-            Write-Log "GlobalProtect installed successfully (msiexec exit code: 0)."
-			# Restart the GlobalProtect service to apply changes
+            if (Wait-ForCondition -Condition { Test-GlobalProtectInstalled } -MaxWaitSeconds 60 -PollIntervalSeconds 5) {
+                Write-Log "GlobalProtect installed successfully (msiexec exit code: 0, registry entry confirmed)."
+            } else {
+                Write-Log "msiexec reported success (exit code 0), but no GlobalProtect registry entry was found within 60 seconds of waiting. Proceeding, but this is unexpected."
+            }
+
+            # Restart the GlobalProtect service to apply changes
             Restart-Service -Name PanGPS -Force
-            Write-Log "GlobalProtect service restarted successfully."
+
+            if (Wait-ForCondition -Condition { (Get-Service -Name PanGPS -ErrorAction SilentlyContinue).Status -eq "Running" } -MaxWaitSeconds 60 -PollIntervalSeconds 5) {
+                Write-Log "GlobalProtect service (PanGPS) restarted and confirmed Running."
+            } else {
+                Write-Log "GlobalProtect service (PanGPS) did not reach Running status within 60 seconds of restarting. It may need more time or a manual check."
+            }
         }
-
-
     } catch {
         Write-Log "Error installing or configuring GlobalProtect: $_"
         exit 1
@@ -174,7 +221,7 @@ $certPassword = "123456789"
 $GlobalProtectInstallerPath = "C:\PaloAlto Package\Installation File\GlobalProtect64.msi"
 
 # Install certificates
-Install-Certificates -trustedRootCertFilePath $trustedRootCertFilePath -personalCertFilePath $personalCertFilePath -decryptionCertFilePath $decryptionCertFilePath -secondDecryptionCertFilePath $secondDecryptionCertFilePath -certPassword $certPassword
+Install-Certificates -trustedRootCertFilePath $trustedRootCertFilePath -decryptionCertFilePath $decryptionCertFilePath -secondDecryptionCertFilePath $secondDecryptionCertFilePath -certPassword $certPassword
 
 # Install GlobalProtect
 Install-GlobalProtect -GlobalProtectInstallerPath $GlobalProtectInstallerPath

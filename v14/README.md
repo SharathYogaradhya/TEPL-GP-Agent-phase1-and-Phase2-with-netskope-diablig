@@ -15,7 +15,7 @@ v14/
 ├── Installation Logs\
 │   └── (created by the scripts on first run)
 ├── Phase1 Script\
-│   └── TEPL Phase1 Windows-Final-v2.ps1   (adds an MSI exit-code check; certs+GP scope unchanged)
+│   └── TEPL Phase1 Windows-Final-v3.ps1   (adds an MSI exit-code check; certs+GP scope unchanged)
 ├── Phase2 Script\
 │   └── TEPL Phase2 Windows-Final-v14.ps1
 └── Netskope Script\
@@ -27,7 +27,7 @@ v14/
 
 1. Copy this entire `v14` folder onto the target machine and place/rename it as `C:\PaloAlto Package\` (the scripts' paths are hardcoded to `C:\PaloAlto Package\...`).
 2. Run whichever script matches what you're testing, as Administrator:
-   - `Phase1 Script\TEPL Phase1 Windows-Final-v2.ps1` — certs + GlobalProtect only.
+   - `Phase1 Script\TEPL Phase1 Windows-Final-v3.ps1` — certs + GlobalProtect only.
    - `Phase2 Script\TEPL Phase2 Windows-Final-v14.ps1` — certs + GlobalProtect + Portal/Prelogon auto-connect + Netskope uninstall once GlobalProtect is confirmed connected.
    - `Netskope Script\TEPL Netskope Disable-and-Uninstall-Windows-Final-v14.ps1` — Netskope disable/uninstall on its own, independent of Phase1/Phase2.
 3. Watch progress in `Installation Logs\` (`PANW-Phase1-Logs.txt`, `PANW-Phase2-Logs.txt`, or `Netskope-Disable-and-Uninstall-Logs.txt` depending on which script you ran).
