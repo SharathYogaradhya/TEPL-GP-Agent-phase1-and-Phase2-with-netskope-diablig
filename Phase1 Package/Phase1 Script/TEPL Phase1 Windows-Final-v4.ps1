@@ -145,6 +145,14 @@ function Wait-ForCondition {
 
 # Function to install GlobalProtect
 #
+# Changed in v4: Restart-Service now uses -ErrorAction Stop. Previously
+# (v3), if the service somehow didn't exist at that point, Restart-Service
+# would raise a non-terminating error - printed to the error stream but not
+# caught by the surrounding try/catch, so the script would carry on past a
+# real failure instead of hitting the catch block's error handling. Making
+# it a terminating error means that failure is now caught and logged like
+# every other failure path in this function.
+#
 # Changed in v3 (all local-machine-state checks - no GlobalProtect
 # network/tunnel connectivity check here, that remains Phase2's job):
 # - Replaced the Get-WmiObject Win32_Product "already installed" check with
@@ -188,7 +196,7 @@ function Install-GlobalProtect {
             }
 
             # Restart the GlobalProtect service to apply changes
-            Restart-Service -Name PanGPS -Force
+            Restart-Service -Name PanGPS -Force -ErrorAction Stop
 
             if (Wait-ForCondition -Condition { (Get-Service -Name PanGPS -ErrorAction SilentlyContinue).Status -eq "Running" } -MaxWaitSeconds 60 -PollIntervalSeconds 5) {
                 Write-Log "GlobalProtect service (PanGPS) restarted and confirmed Running."
