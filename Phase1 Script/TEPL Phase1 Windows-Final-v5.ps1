@@ -19,12 +19,26 @@ function Test-Administrator {
 }
 
 # Function to install certificates
+#
+# Changed in v5: installs the Prelogon Root CA certificate (to the Trusted
+# Root store) and the Prelogon Machine certificate (to the Personal "My"
+# store, at both LocalMachine and CurrentUser) needed for GlobalProtect
+# Prelogon machine-certificate authentication. GlobalProtect fetches the
+# cert from the machine (LocalMachine) store during the prelogon stage;
+# CurrentUser is also populated for consistency. The Machine certificate
+# must be a .pfx (cert + private key) - a combined cert+encrypted-key .pem
+# was tested directly against this same X509Certificate2 constructor and
+# loaded with HasPrivateKey = False (no error, but the private key is
+# silently dropped), so a plain .pem/.der export cannot be used for it.
 function Install-Certificates {
     param (
         [string]$trustedRootCertFilePath,
         [string]$decryptionCertFilePath,
         [string]$secondDecryptionCertFilePath, # New parameter for the second decryption certificate
-        [string]$certPassword
+        [string]$certPassword,
+        [string]$preLogonCARootCertFilePath,
+        [string]$preLogonMachineCertFilePath,
+        [string]$preLogonMachineCertPassword
     )
 
     try {
@@ -79,6 +93,14 @@ function Install-Certificates {
             Write-Log "Second decryption certificate file not found at path: $secondDecryptionCertFilePath"
             throw "Second decryption certificate file not found."
         }
+        if (-Not (Test-Path -Path $preLogonCARootCertFilePath)) {
+            Write-Log "Prelogon Root CA certificate file not found at path: $preLogonCARootCertFilePath"
+            throw "Prelogon Root CA certificate file not found."
+        }
+        if (-Not (Test-Path -Path $preLogonMachineCertFilePath)) {
+            Write-Log "Prelogon Machine certificate file not found at path: $preLogonMachineCertFilePath"
+            throw "Prelogon Machine certificate file not found."
+        }
 
         # Install trusted root certificate to Trusted Root store
         Install-Cert -certFilePath $trustedRootCertFilePath -storeName "Root" -storeLocation "LocalMachine" -certPassword $null
@@ -88,6 +110,15 @@ function Install-Certificates {
 
         # Install second decryption certificate to Trusted Root store
         Install-Cert -certFilePath $secondDecryptionCertFilePath -storeName "Root" -storeLocation "LocalMachine" -certPassword $certPassword
+
+        # Install Prelogon Root CA certificate to Trusted Root store (no private key)
+        Install-Cert -certFilePath $preLogonCARootCertFilePath -storeName "Root" -storeLocation "LocalMachine" -certPassword $null
+
+        # Install Prelogon Machine certificate (with private key) to the Personal
+        # store at both LocalMachine and CurrentUser - GlobalProtect fetches it
+        # from the machine store during the prelogon stage.
+        Install-Cert -certFilePath $preLogonMachineCertFilePath -storeName "My" -storeLocation "LocalMachine" -certPassword $preLogonMachineCertPassword
+        Install-Cert -certFilePath $preLogonMachineCertFilePath -storeName "My" -storeLocation "CurrentUser" -certPassword $preLogonMachineCertPassword
 
     } catch {
         Write-Log "Error installing certificates: $_"
@@ -228,8 +259,16 @@ $secondDecryptionCertFilePath = "C:\PaloAlto Package\Certificates\Forward-Trust-
 $certPassword = "123456789"
 $GlobalProtectInstallerPath = "C:\PaloAlto Package\Installation File\GlobalProtect64.msi"
 
+# Prelogon Root CA + Machine certificate, needed for GlobalProtect Prelogon
+# machine-certificate authentication. The Machine cert must be a .pfx (cert +
+# private key) - see the Install-Certificates function comment for why a
+# plain .pem/.der export cannot be used for it.
+$preLogonCARootCertFilePath = "C:\PaloAlto Package\Certificates\TEPL-PreLogon-CA.pem"
+$preLogonMachineCertFilePath = "C:\PaloAlto Package\Certificates\TEPL-PreLogon-MachineCert.pfx"
+$preLogonMachineCertPassword = "123456789"
+
 # Install certificates
-Install-Certificates -trustedRootCertFilePath $trustedRootCertFilePath -decryptionCertFilePath $decryptionCertFilePath -secondDecryptionCertFilePath $secondDecryptionCertFilePath -certPassword $certPassword
+Install-Certificates -trustedRootCertFilePath $trustedRootCertFilePath -decryptionCertFilePath $decryptionCertFilePath -secondDecryptionCertFilePath $secondDecryptionCertFilePath -certPassword $certPassword -preLogonCARootCertFilePath $preLogonCARootCertFilePath -preLogonMachineCertFilePath $preLogonMachineCertFilePath -preLogonMachineCertPassword $preLogonMachineCertPassword
 
 # Install GlobalProtect
 Install-GlobalProtect -GlobalProtectInstallerPath $GlobalProtectInstallerPath
