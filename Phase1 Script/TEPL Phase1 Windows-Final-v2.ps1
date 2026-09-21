@@ -107,6 +107,16 @@ function Install-Certificates {
 }
 
 # Function to install GlobalProtect
+#
+# Changed in v2: the msiexec install now captures and checks the
+# installer's own exit code instead of assuming success right after
+# Start-Process returns. Previously, a failed GlobalProtect install would
+# still log "GlobalProtect installed successfully" and continue on to
+# restart the (non-functional) service - the script had no way to catch
+# that failure. Phase1's scope is unchanged otherwise: install certs and
+# the GP agent, and log the outcome - Portal/Prelogon configuration,
+# confirming GlobalProtect actually connects, and any Netskope handling
+# remain Phase2's responsibility, not Phase1's.
 function Install-GlobalProtect {
     param (
         [string]$GlobalProtectInstallerPath
@@ -123,16 +133,22 @@ function Install-GlobalProtect {
         if ($globalProtectInstalled) {
             Write-Log "GlobalProtect is already installed. Skipping installation."
         } else {
-            # Run the GlobalProtect installer silently
-            Start-Process msiexec.exe -ArgumentList "/i `"$GlobalProtectInstallerPath`" /quiet /norestart" -Wait
+            # Run the GlobalProtect installer silently, capturing its exit code
+            $proc = Start-Process msiexec.exe -ArgumentList "/i `"$GlobalProtectInstallerPath`" /quiet /norestart" -Wait -PassThru
+
+            if ($proc.ExitCode -ne 0) {
+                Write-Log "GlobalProtect installer failed (msiexec exit code: $($proc.ExitCode)). Installation did not complete successfully."
+                throw "GlobalProtect MSI install failed with exit code $($proc.ExitCode)."
+            }
+
             Start-Sleep -Seconds 45
-            Write-Log "GlobalProtect installed successfully."
+            Write-Log "GlobalProtect installed successfully (msiexec exit code: 0)."
 			# Restart the GlobalProtect service to apply changes
             Restart-Service -Name PanGPS -Force
             Write-Log "GlobalProtect service restarted successfully."
         }
 
-        
+
     } catch {
         Write-Log "Error installing or configuring GlobalProtect: $_"
         exit 1
