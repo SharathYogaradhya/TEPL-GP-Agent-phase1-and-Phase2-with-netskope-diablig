@@ -266,19 +266,23 @@ function Test-GlobalProtectConnected {
     return $false
 }
 
-# Shared Netskope functions (v6): confirmed against real data collected
-# from an actual Netskope-installed machine (service name stAgentSvc,
-# MSI-based install, install folder) and official Netskope documentation
-# (the PASSWORD MSI public property for the tamper-protection bypass).
-# Disable-NetskopeAgent also disables any Netskope-related Scheduled
-# Tasks and verifies the end state (service stopped + disabled) instead
-# of assuming success. Uninstall-NetskopeAgent tries a plain uninstall
-# first, then retries once with the configured password (applied via the
-# confirmed PASSWORD property) only if the plain attempt did not remove
-# the client.
-$netskopeFunctionsPath = "C:\PaloAlto Package\Netskope Script\Netskope-Functions-v6.ps1"
+# Shared Netskope functions (v7): polls for up to 90 seconds after each
+# uninstall attempt to confirm removal, instead of a single fixed
+# 15-second wait - a real-machine test run showed a genuinely successful
+# uninstall (exit code 0) still misreported as "still present" because
+# Netskope's own cleanup (folder/registry removal) hadn't finished within
+# that fixed 15 seconds. Also carries the confirmed real data (service
+# name stAgentSvc, MSI-based install, install folder) and official
+# Netskope documentation (the PASSWORD MSI public property for the
+# tamper-protection bypass). Disable-NetskopeAgent also disables any
+# Netskope-related Scheduled Tasks and verifies the end state (service
+# stopped + disabled) instead of assuming success. Uninstall-NetskopeAgent
+# tries a plain uninstall first, then retries once with the configured
+# password (applied via the confirmed PASSWORD property) only if the
+# plain attempt did not remove the client.
+$netskopeFunctionsPath = "C:\PaloAlto Package\Netskope Script\Netskope-Functions-v7.ps1"
 if (-not (Test-Path -Path $netskopeFunctionsPath)) {
-    Write-Log "Netskope-Functions-v6.ps1 not found at path: $netskopeFunctionsPath"
+    Write-Log "Netskope-Functions-v7.ps1 not found at path: $netskopeFunctionsPath"
     exit 1
 }
 . $netskopeFunctionsPath

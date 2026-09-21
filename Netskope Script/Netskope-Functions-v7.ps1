@@ -1,8 +1,20 @@
-# Shared Netskope client functions (v6).
+# Shared Netskope client functions (v7).
 # Dot-source this file from a calling script (which must already define
 # Write-Log) rather than importing it as a module, so these functions log
 # to the calling script's own log file:
-#   . "C:\PaloAlto Package\Netskope Script\Netskope-Functions-v6.ps1"
+#   . "C:\PaloAlto Package\Netskope Script\Netskope-Functions-v7.ps1"
+#
+# Changes from v6 (Netskope-Functions-v6.ps1):
+# - A real-machine test run showed a genuinely successful uninstall (exit
+#   code 0) still logged as "still present" because the fixed 15-second
+#   Start-Sleep after each uninstall attempt was not always long enough
+#   for Netskope's own cleanup (removing its install folder and registry
+#   uninstall entry) to finish before Test-NetskopeInstalled re-checked.
+#   Manual checks run shortly afterwards (service, process, registry
+#   entry, install folder) all confirmed it was actually gone. Replaced
+#   the fixed sleep with Wait-ForNetskopeRemoved, which polls for up to
+#   90 seconds (matching the style of Test-GlobalProtectConnected)
+#   instead of declaring failure after a single 15-second wait.
 #
 # Changes from v5 (Netskope-Functions-v5.ps1):
 # - Confirmed via official Netskope documentation ("Uninstalling the
@@ -131,6 +143,30 @@ $script:NetskopeInstallFolder = "C:\Program Files (x86)\Netskope\STAgent"
 function Test-NetskopeInstalled {
     $info = Get-NetskopeUninstallInfo
     return ($null -ne $info) -or (Test-Path -Path $script:NetskopeInstallFolder)
+}
+
+# Polls until Netskope is confirmed removed or the wait window expires,
+# rather than checking once after a single fixed sleep. A successful
+# (exit code 0) msiexec uninstall does not guarantee Netskope's own
+# cleanup (folder removal, registry entry removal) has finished by the
+# time msiexec.exe returns - real-machine testing showed this can lag
+# behind a genuinely successful uninstall by more than 15 seconds.
+function Wait-ForNetskopeRemoved {
+    param (
+        [int]$MaxWaitSeconds = 90,
+        [int]$PollIntervalSeconds = 15
+    )
+
+    $elapsed = 0
+    while ($elapsed -le $MaxWaitSeconds) {
+        if (-not (Test-NetskopeInstalled)) {
+            return $true
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+        $elapsed += $PollIntervalSeconds
+    }
+
+    return -not (Test-NetskopeInstalled)
 }
 
 # Function to disable the Netskope client without uninstalling it, in a
@@ -268,9 +304,9 @@ function Uninstall-NetskopeAgent {
         # Step 1: simple uninstall, no password
         Write-Log "Step 1: attempting a simple uninstall (no password)."
         $exitCode = Invoke-NetskopeUninstaller -UninstallString $uninstallString -NetskopeDisablePassword ""
-        Start-Sleep -Seconds 15
+        $removed = Wait-ForNetskopeRemoved
 
-        if ($exitCode -eq 0 -and -not (Test-NetskopeInstalled)) {
+        if ($exitCode -eq 0 -and $removed) {
             Write-Log "Netskope client uninstalled successfully on the first attempt."
             return
         }
@@ -286,9 +322,9 @@ function Uninstall-NetskopeAgent {
         # Step 2: retry once with the configured disable password
         Write-Log "Step 2: retrying uninstall with the configured disable password."
         $exitCode2 = Invoke-NetskopeUninstaller -UninstallString $uninstallString -NetskopeDisablePassword $NetskopeDisablePassword
-        Start-Sleep -Seconds 15
+        $removed2 = Wait-ForNetskopeRemoved
 
-        if ($exitCode2 -eq 0 -and -not (Test-NetskopeInstalled)) {
+        if ($exitCode2 -eq 0 -and $removed2) {
             Write-Log "Netskope client uninstalled successfully after retrying with the disable password."
         } else {
             Write-Log "Netskope client is still present after retrying with the disable password (exit code: $exitCode2)."
