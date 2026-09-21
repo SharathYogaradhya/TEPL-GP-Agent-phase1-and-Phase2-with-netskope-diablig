@@ -1,13 +1,12 @@
 # Phase1 Package
 
-Self-contained deployment package for Phase1 only (install certificates + GlobalProtect agent). No Netskope handling — that only exists in the Phase2 Package.
+Self-contained deployment package for Phase1 only (install certificates + GlobalProtect agent). No Netskope handling — that only exists in the Phase2 Package. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in here already, nothing to download separately.
 
 ## Deployment
 
-1. Copy this entire `Phase1 Package` folder onto the target machine as `C:\PaloAlto Package\` (i.e. the folder itself is renamed/placed at that path — the script's paths are hardcoded to `C:\PaloAlto Package\...`).
-2. Download `GlobalProtect64.msi` from the [full package release](https://github.com/SharathYogaradhya/TEPL-GP-Agent-phase1-and-Phase2-with-netskope-diablig/releases/download/TEPLcompletepackage/PaloAlto.Package.zip) and place it in `Installation File\` (this binary is not stored in git; the `.gitkeep` file is a placeholder).
-3. Run `Phase1 Script\TEPL Phase1 Windows-Final-v4.ps1` as Administrator.
-4. Watch progress / verify success in `Installation Logs\PANW-Phase1-Logs.txt`.
+1. Copy this entire `Phase1 Package` folder onto the target machine and place/rename it as `C:\PaloAlto Package\` (the script's paths are hardcoded to `C:\PaloAlto Package\...`).
+2. Run `Phase1 Script\TEPL Phase1 Windows-Final-v4.ps1` as Administrator.
+3. Watch progress / verify success in `Installation Logs\PANW-Phase1-Logs.txt`.
 
 ## Contents
 
@@ -18,7 +17,7 @@ C:\PaloAlto Package\
 │   ├── Forward-Trust-CA.pem
 │   └── Forward-Trust-CA-ECDSA.pem
 ├── Installation File\
-│   └── GlobalProtect64.msi   (download separately, see step 2)
+│   └── GlobalProtect64.msi   (bundled — no separate download needed)
 ├── Installation Logs\
 │   └── PANW-Phase1-Logs.txt  (created by the script on first run)
 └── Phase1 Script\
