@@ -324,7 +324,14 @@ Install-GlobalProtect -GlobalProtectInstallerPath $GlobalProtectInstallerPath -p
 # Only touch Netskope once GlobalProtect is confirmed connected. If we
 # can't confirm it, leave Netskope alone so the user keeps a working
 # fallback connection.
-if (Test-GlobalProtectConnected) {
+#
+# Wait window raised from the 120s default to 300s (5 minutes): 120s is
+# comfortable for certificate-based auto-connect, but is not necessarily
+# enough time for a portal that requires interactive SAML/SSO login (with
+# possible MFA) before the tunnel comes up. This has not yet been
+# confirmed against the customer's actual auth flow, so the longer window
+# is the safer default until that is verified on real hardware.
+if (Test-GlobalProtectConnected -MaxWaitSeconds 300 -PollIntervalSeconds 10) {
     if ($netskopeAction -eq "Disable") {
         Disable-NetskopeAgent
     } else {
