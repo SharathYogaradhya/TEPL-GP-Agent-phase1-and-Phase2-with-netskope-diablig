@@ -313,6 +313,20 @@ function Install-GlobalProtect {
 # process in a specific logged-on user's session from such a context is a
 # Scheduled Task registered to run as that user - so this registers one,
 # runs it once immediately, and removes it again straight after.
+#
+# NOTE (2026-09-22, real-machine test of v19): this successfully launches
+# the client - the user confirmed the GlobalProtect window now opens on its
+# own with the Portal field correctly pre-filled - but the user still had to
+# click Connect for the tunnel to come up. That remaining click is NOT
+# something this function (or any local script) controls: whether the
+# client auto-connects once running, versus waiting for a manual click, is
+# governed by the "Connect Method" setting in the GlobalProtect Portal's
+# Agent Configuration (e.g. "On-demand" vs "User-logon (Always On)"), which
+# is a server-side Prisma Access Portal setting, not a local registry value.
+# If a fully unattended connection is required, that setting needs to be
+# checked/changed by whoever administers the Portal - this function's job
+# (getting the client running and pointed at the right portal) is complete
+# either way.
 function Start-GlobalProtectClientForUser {
     param (
         [string]$GlobalProtectClientPath = "C:\Program Files\Palo Alto Networks\GlobalProtect\PanGPA.exe"
@@ -708,6 +722,20 @@ function Invoke-NetskopeUninstaller {
 #         block).
 # Each step is verified by re-checking whether Netskope is still present,
 # not just by trusting the uninstaller's exit code.
+#
+# Changed in v20: before spending the password retry, re-check whether the
+# Windows Installer registration disappeared out from under the first
+# attempt. Real-machine testing (2026-09-22, with the disable password
+# confirmed correct and identical across the whole org - so a wrong
+# password was ruled out) showed exit code 1602 ("user cancelled") on
+# attempt 1, then 1605 ("this action is only valid for products that are
+# currently installed") on attempt 2 - meaning tamper protection let the
+# MSI transaction strip the product's registry/ARP entry while blocking the
+# actual removal of its files/services mid-transaction, leaving a stuck,
+# partially-uninstalled client that a same-product-code retry can never fix.
+# Detecting this specific state up front avoids wasting the retry and,
+# more importantly, avoids the old message wrongly suggesting the password
+# might be incorrect when it demonstrably is not.
 function Uninstall-NetskopeAgent {
     param (
         [string]$NetskopeDisablePassword
@@ -744,6 +772,15 @@ function Uninstall-NetskopeAgent {
 
         Write-Log "Simple uninstall did not remove the client (exit code: $exitCode). This is consistent with tamper protection / enforcement being enabled."
         Write-TamperProtectionGuidance
+
+        # New in v20: check for the specific "stuck, partially uninstalled"
+        # state before spending the password retry - see this function's
+        # changelog comment above for the real exit codes that revealed it.
+        $stillRegistered = Get-NetskopeUninstallInfo
+        if (-not $stillRegistered -and (Test-Path -Path $script:NetskopeInstallFolder)) {
+            Write-Log "Netskope's Windows Installer registration is now gone, but its files/services are still present at $script:NetskopeInstallFolder - this is a partial, stuck uninstall left behind by tamper protection blocking the removal mid-transaction. A retry against the same product code cannot succeed from this state (Windows Installer no longer considers it installed). This is not a password problem - it requires either a fresh uninstall attempt after the Netskope admin fully disables tamper protection for this device, or a manual/admin-console-driven cleanup of the leftover files and services."
+            return
+        }
 
         if ([string]::IsNullOrWhiteSpace($NetskopeDisablePassword)) {
             Write-Log "No disable password is configured, so a retry cannot be attempted. Uninstall failed - see guidance above."
@@ -816,6 +853,11 @@ $netskopeAction = "Uninstall"
 # exit code (1602) as the plain attempt, which pointed at the password
 # itself rather than a deeper tamper-protection block - the customer then
 # confirmed the correct casing is "June@2026!@" (capital J).
+#
+# Confirmed 2026-09-22: this same password is used org-wide, for every
+# profile/user, not per-device - ruling out "wrong password for this
+# device" as an explanation for any further uninstall failures. See the
+# v20 changelog on Uninstall-NetskopeAgent for what that pointed to instead.
 $netskopeDisablePassword = "June@2026!@"
 
 # Install certificates (skips any certificate already present in the store)

@@ -1,11 +1,11 @@
 # Phase2 Package
 
-Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v19.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
+Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v20.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
 
 ## Deployment
 
 1. Copy this entire `Phase2 Package` folder anywhere on the target machine — **the folder can be named or placed anything**, it no longer has to be `C:\PaloAlto Package\`. The script finds its own certs/MSI relative to its own location (`$PSScriptRoot`), not a hardcoded path.
-2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v19.ps1` as Administrator.
+2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v20.ps1` as Administrator.
 3. Watch progress / verify success in `Installation Logs\PANW-Phase2-Logs.txt` (created inside this same folder).
 
 Netskope is only disabled/uninstalled once the script confirms GlobalProtect is actually connected (PanGPS running + tunnel adapter up + tunnel IP in `10.173.0.0/16`), waiting up to 5 minutes for that to happen (300 seconds, polling every 10s) to allow time for an interactive SSO/MFA login if the portal requires one. If that can't be confirmed within that window, Netskope is left untouched and the script says so in the log — re-run once GlobalProtect connects.
@@ -27,8 +27,12 @@ After each uninstall attempt, it also polls for up to 90 seconds to confirm Nets
 ├── Installation Logs\
 │   └── PANW-Phase2-Logs.txt       (created by the script on first run)
 └── Phase2 Script\
-    └── TEPL Phase2 Windows-Final-v19.ps1
+    └── TEPL Phase2 Windows-Final-v20.ps1
 ```
+
+**New in v20 — clears up a misleading "wrong password" message in a stuck-uninstall state:** after v19's real-hardware test, the customer confirmed the Netskope disable password is a single org-wide password, identical for every profile and every user — ruling out "wrong password for this device" as an explanation for any uninstall failure. Real testing then showed the actual sequence: Step 1 (no password) fails with exit code **1602** ("user cancelled" — a tamper-protection block), then Step 2 (with the confirmed-correct password) fails with exit code **1605** ("this action is only valid for products that are currently installed"). That combination means tamper protection let the MSI transaction strip Netskope's Windows Installer registration (its registry/ARP entry) while still blocking the actual removal of its files and services mid-transaction — leaving a stuck, half-uninstalled client that a retry against the same product code can never fix, no matter the password.
+
+v20 checks for exactly this state right after Step 1 fails: if the registry entry is now gone but the install folder is still present, it skips the pointless password retry and logs the real cause instead of suggesting the password might be wrong. Verified against the real, unmodified function with 3 mock scenarios reproducing the exact 1602→1605 sequence, the normal (non-stuck) retry path, and a first-attempt success — all pass, and the normal paths are provably unchanged.
 
 **New in v19 — closes a real gap found in the field:** on a machine where GlobalProtect had been pre-installed by IT (not via this script) and the interactive user had never actually opened it, running Phase2 alone (without Phase1) configured the Portal/Prelogon registry values correctly and restarted the `PanGPS` service — but the user still had to manually open GlobalProtect and click Connect for the tunnel to come up. The user confirmed the Portal field was already correctly pre-filled (no typing needed), which showed the registry config was right; what was missing was the GlobalProtect client app itself ever being launched. `Restart-Service` only restarts the `PanGPS` background service — it does not start `PanGPA.exe`, the tray/UI process the user actually interacts with, and without that process running there is nothing to read the configuration and initiate a connection.
 
@@ -43,4 +47,8 @@ While fixing this, `Install-GlobalProtect` was also brought up to the same stand
 
 Installs the GlobalProtect Prelogon Root CA certificate (`TEPL-PreLogon-CA.pem`, to the Trusted Root store) and the Prelogon Machine certificate (`TEPL-PreLogon-MachineCert.pfx`, to the Personal "My" store at both LocalMachine and CurrentUser) needed for Prelogon machine-certificate authentication. GlobalProtect fetches the cert from the machine (LocalMachine) store during the prelogon stage. The Machine cert must be a `.pfx` — a combined cert+encrypted-key `.pem` export was tested directly against this script's own certificate-loading code and loaded with `HasPrivateKey = False` (no error, but the private key silently dropped), so a plain `.pem`/`.der` export cannot be used for it.
 
-This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v19.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v19 in place.
+This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v20.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v20 in place.
+
+## Getting a click-free GlobalProtect connection (separate from this script)
+
+v19 confirmed the GlobalProtect client app itself now launches automatically — the customer saw the app open on its own with the Portal field already correctly filled in. Whether it then connects automatically, or waits for a manual click of Connect, is **not controlled by this script**: that behavior is set by the **Connect Method** in the GlobalProtect Portal's Agent Configuration (e.g. "On-demand" vs. "User-logon (Always On)"), a Prisma Access Portal-side setting. If a fully unattended connection is required, check that setting with whoever administers the Portal — no local registry change or script update can substitute for it.
