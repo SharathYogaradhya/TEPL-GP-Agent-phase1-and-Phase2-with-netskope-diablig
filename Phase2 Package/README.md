@@ -1,11 +1,11 @@
 # Phase2 Package
 
-Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v18.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
+Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v19.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
 
 ## Deployment
 
 1. Copy this entire `Phase2 Package` folder anywhere on the target machine — **the folder can be named or placed anything**, it no longer has to be `C:\PaloAlto Package\`. The script finds its own certs/MSI relative to its own location (`$PSScriptRoot`), not a hardcoded path.
-2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v18.ps1` as Administrator.
+2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v19.ps1` as Administrator.
 3. Watch progress / verify success in `Installation Logs\PANW-Phase2-Logs.txt` (created inside this same folder).
 
 Netskope is only disabled/uninstalled once the script confirms GlobalProtect is actually connected (PanGPS running + tunnel adapter up + tunnel IP in `10.173.0.0/16`), waiting up to 5 minutes for that to happen (300 seconds, polling every 10s) to allow time for an interactive SSO/MFA login if the portal requires one. If that can't be confirmed within that window, Netskope is left untouched and the script says so in the log — re-run once GlobalProtect connects.
@@ -27,8 +27,12 @@ After each uninstall attempt, it also polls for up to 90 seconds to confirm Nets
 ├── Installation Logs\
 │   └── PANW-Phase2-Logs.txt       (created by the script on first run)
 └── Phase2 Script\
-    └── TEPL Phase2 Windows-Final-v18.ps1
+    └── TEPL Phase2 Windows-Final-v19.ps1
 ```
+
+**New in v19 — closes a real gap found in the field:** on a machine where GlobalProtect had been pre-installed by IT (not via this script) and the interactive user had never actually opened it, running Phase2 alone (without Phase1) configured the Portal/Prelogon registry values correctly and restarted the `PanGPS` service — but the user still had to manually open GlobalProtect and click Connect for the tunnel to come up. The user confirmed the Portal field was already correctly pre-filled (no typing needed), which showed the registry config was right; what was missing was the GlobalProtect client app itself ever being launched. `Restart-Service` only restarts the `PanGPS` background service — it does not start `PanGPA.exe`, the tray/UI process the user actually interacts with, and without that process running there is nothing to read the configuration and initiate a connection.
+
+v19 adds `Start-GlobalProtectClientForUser`, called right after `Install-GlobalProtect`: it detects the logged-on interactive user and launches `PanGPA.exe` in that user's own session via a short-lived Scheduled Task (registered, run once, then removed) — the standard way to start a GUI process in a specific user's session from a script running as SYSTEM or an elevated admin session, since a direct `Start-Process` from there would land in that context's own session, not the user's. It's best-effort and safe: if `PanGPA.exe` is already running it does nothing, and if no one is logged on yet (or the exe can't be found) it logs why and continues — the registry config is still correct either way, so the worst case is unchanged from before (open GlobalProtect once, click Connect, no typing). Verified against the real, unmodified function with 4 mock scenarios (already running, successful launch, no logged-on user, missing exe) — all pass.
 
 **New in v18 — fixes a real bug found on real hardware:** the Portal/Prelogon registry writes (`Set-ItemProperty`) would throw "Cannot find path... because it does not exist" if the target key wasn't already there — on a real test machine, this happened for the per-user `HKCU:\SOFTWARE\Palo Alto Networks\GlobalProtect` key, because GlobalProtect was already installed but that user account had never actually launched it (the per-user key gets created by the running client, not the MSI installer). Since this was a non-terminating PowerShell error, the script didn't stop — it printed the error and then logged "User level portal FQDN configured" right after anyway, which was **false**: the value was never actually set. v18 ensures the key exists (creating it with `New-Item -Force` if missing) before writing to it, for all 4 registry writes (HKCU and HKLM, Portal and Prelogon). Verified by reproducing the exact real-machine condition (HKCU key missing, HKLM key present) against the real, unmodified function — confirmed both HKCU values are now actually set, with zero errors.
 
@@ -39,4 +43,4 @@ While fixing this, `Install-GlobalProtect` was also brought up to the same stand
 
 Installs the GlobalProtect Prelogon Root CA certificate (`TEPL-PreLogon-CA.pem`, to the Trusted Root store) and the Prelogon Machine certificate (`TEPL-PreLogon-MachineCert.pfx`, to the Personal "My" store at both LocalMachine and CurrentUser) needed for Prelogon machine-certificate authentication. GlobalProtect fetches the cert from the machine (LocalMachine) store during the prelogon stage. The Machine cert must be a `.pfx` — a combined cert+encrypted-key `.pem` export was tested directly against this script's own certificate-loading code and loaded with `HasPrivateKey = False` (no error, but the private key silently dropped), so a plain `.pem`/`.der` export cannot be used for it.
 
-This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v18.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v18 in place.
+This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v19.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v19 in place.
