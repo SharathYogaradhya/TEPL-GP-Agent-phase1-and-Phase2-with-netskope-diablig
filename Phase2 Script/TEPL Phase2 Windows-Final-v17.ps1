@@ -1,5 +1,15 @@
+# Determine the package root dynamically from this script's own location,
+# instead of hardcoding "C:\PaloAlto Package\...". This script always lives
+# at <PackageRoot>\Phase2 Script\<this file>, so the parent of this script's
+# own folder is the package root - this works no matter what the top-level
+# folder is named (e.g. "PaloAlto Package Phase2") or where it's placed
+# (a fixed path, an Intune-extracted temp folder, anywhere). Removes the
+# need for a deployment step to copy/rename the folder to a specific path
+# before running this script.
+$packageRoot = Split-Path -Parent $PSScriptRoot
+
 # Define the log file path
-$logFilePath = "C:\PaloAlto Package\Installation Logs\PANW-Phase2-Logs.txt"
+$logFilePath = Join-Path $packageRoot "Installation Logs\PANW-Phase2-Logs.txt"
 
 # Function to log messages
 function Write-Log {
@@ -609,20 +619,21 @@ if (-not (Test-Administrator)) {
 
 Write-Log "Script is running with administrative privileges."
 
-# Define variables
-$trustedRootCertFilePath = "C:\PaloAlto Package\Certificates\TEPL-Root-CA.pem"
-$decryptionCertFilePath = "C:\PaloAlto Package\Certificates\Forward-Trust-CA.pem" # Adjust path as needed
-$secondDecryptionCertFilePath = "C:\PaloAlto Package\Certificates\Forward-Trust-CA-ECDSA.pem" # Adjust path as needed
+# Define variables - all resolved relative to $packageRoot (computed at the
+# top of this script from its own location), not a hardcoded fixed path.
+$trustedRootCertFilePath = Join-Path $packageRoot "Certificates\TEPL-Root-CA.pem"
+$decryptionCertFilePath = Join-Path $packageRoot "Certificates\Forward-Trust-CA.pem"
+$secondDecryptionCertFilePath = Join-Path $packageRoot "Certificates\Forward-Trust-CA-ECDSA.pem"
 $certPassword = "123456789"
-$GlobalProtectInstallerPath = "C:\PaloAlto Package\Installation File\GlobalProtect64.msi"
+$GlobalProtectInstallerPath = Join-Path $packageRoot "Installation File\GlobalProtect64.msi"
 $portal_fqdn = "tepl.gpcloudservice.com"
 
 # Prelogon Root CA + Machine certificate, needed for GlobalProtect Prelogon
 # machine-certificate authentication. The Machine cert must be a .pfx (cert +
 # private key) - see the Install-Certificates function comment for why a
 # plain .pem/.der export cannot be used for it.
-$preLogonCARootCertFilePath = "C:\PaloAlto Package\Certificates\TEPL-PreLogon-CA.pem"
-$preLogonMachineCertFilePath = "C:\PaloAlto Package\Certificates\TEPL-PreLogon-MachineCert.pfx"
+$preLogonCARootCertFilePath = Join-Path $packageRoot "Certificates\TEPL-PreLogon-CA.pem"
+$preLogonMachineCertFilePath = Join-Path $packageRoot "Certificates\TEPL-PreLogon-MachineCert.pfx"
 $preLogonMachineCertPassword = "123456789"
 
 # Set to "Uninstall" to fully remove the Netskope client once GlobalProtect
