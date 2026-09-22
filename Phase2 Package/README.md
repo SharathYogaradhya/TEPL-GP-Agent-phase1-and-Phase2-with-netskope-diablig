@@ -1,11 +1,11 @@
 # Phase2 Package
 
-Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v22.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
+Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v23.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
 
 ## Deployment
 
 1. Copy this entire `Phase2 Package` folder anywhere on the target machine — **the folder can be named or placed anything**, it no longer has to be `C:\PaloAlto Package\`. The script finds its own certs/MSI relative to its own location (`$PSScriptRoot`), not a hardcoded path.
-2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v22.ps1` as Administrator.
+2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v23.ps1` as Administrator.
 3. Watch progress / verify success in `Installation Logs\PANW-Phase2-Logs.txt` (created inside this same folder).
 
 Netskope is only disabled/uninstalled once the script confirms GlobalProtect is actually connected (PanGPS running + tunnel adapter up + tunnel IP in `10.173.0.0/16`), waiting up to 5 minutes for that to happen (300 seconds, polling every 10s) to allow time for an interactive SSO/MFA login if the portal requires one. If that can't be confirmed within that window, Netskope is left untouched and the script says so in the log — re-run once GlobalProtect connects.
@@ -27,8 +27,12 @@ After each uninstall attempt, it also polls for up to 90 seconds to confirm Nets
 ├── Installation Logs\
 │   └── PANW-Phase2-Logs.txt       (created by the script on first run)
 └── Phase2 Script\
-    └── TEPL Phase2 Windows-Final-v22.ps1
+    └── TEPL Phase2 Windows-Final-v23.ps1
 ```
+
+**New in v23 — uses a direct client restart when running interactively, not just via Scheduled Task:** the customer confirmed the mechanism actually proven to work on a prior project was **not** a Scheduled Task — it was a direct process restart. That distinction matters: every real-hardware test of this script so far has been someone running it interactively as an elevated Administrator, not via Intune's "Run as System". In that interactive case, a UAC-elevated process already runs in the *same session* as the logged-on user — there's no Session 0 isolation to work around, so v21's Scheduled Task indirection was unnecessary there, and possibly itself a reason a Scheduled-Task-launched `PanGPA.exe` behaved differently than one started normally.
+
+v23 adds `Test-RunningAsSystem` (checks for the SYSTEM SID, `S-1-5-18`) and branches on it: when running as SYSTEM (the real Intune "Run as System" production path, where Session 0 isolation is real), `Start-GlobalProtectClientForUser` still uses the Scheduled Task mechanism from v21 — that part is unchanged and still necessary there. When running any other way (an admin running this script directly, which is what every real test has been), it now does a direct `Stop-Process` + `Start-Process` instead — the exact mechanism confirmed to work. Both paths keep the same safety guarantees as v21 (an already-connected client is left alone; a client is never killed unless it can actually be relaunched). Verified against the real, unmodified function with 8 mock scenarios covering both paths (not-running, running-but-stale, already-connected, and safety-refusal cases for each) — all pass.
 
 **New in v22 — skips the no-password Netskope uninstall attempt entirely:** the customer confirmed tamper protection enforcement is always active in this environment and the disable password is always required — identical for every user and device. That means the no-password attempt introduced back when this logic was first written was guaranteed to fail on every single deployment, and it wasn't free: the failed msiexec call plus the ~90-second `Wait-ForNetskopeRemoved` poll that followed it ran to completion on every machine before the retry (the one that could actually work) even started.
 
@@ -57,7 +61,7 @@ While fixing this, `Install-GlobalProtect` was also brought up to the same stand
 
 Installs the GlobalProtect Prelogon Root CA certificate (`TEPL-PreLogon-CA.pem`, to the Trusted Root store) and the Prelogon Machine certificate (`TEPL-PreLogon-MachineCert.pfx`, to the Personal "My" store at both LocalMachine and CurrentUser) needed for Prelogon machine-certificate authentication. GlobalProtect fetches the cert from the machine (LocalMachine) store during the prelogon stage. The Machine cert must be a `.pfx` — a combined cert+encrypted-key `.pem` export was tested directly against this script's own certificate-loading code and loaded with `HasPrivateKey = False` (no error, but the private key silently dropped), so a plain `.pem`/`.der` export cannot be used for it.
 
-This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v22.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v22 in place.
+This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v23.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v23 in place.
 
 ## Getting a click-free GlobalProtect connection
 

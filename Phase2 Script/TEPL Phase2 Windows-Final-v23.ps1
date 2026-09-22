@@ -363,6 +363,16 @@ function Test-GlobalProtectConnectedNow {
     return $null
 }
 
+# Returns $true if this script is currently running as the SYSTEM account
+# (NT AUTHORITY\SYSTEM, SID S-1-5-18) - e.g. deployed via Intune's "Run as
+# System" install context - as opposed to an interactive user's own
+# (possibly UAC-elevated) session. New in v23: this distinction is what
+# decides how Start-GlobalProtectClientForUser launches the client below.
+function Test-RunningAsSystem {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return $identity.User.Value -eq "S-1-5-18"
+}
+
 # New in v19: launches the GlobalProtect client app (PanGPA.exe) in the
 # logged-on interactive user's own desktop session.
 #
@@ -377,16 +387,6 @@ function Test-GlobalProtectConnectedNow {
 # launch PanGPA.exe (the tray/UI process a user actually interacts with),
 # and without that process running there is nothing to read our config and
 # initiate a connection.
-#
-# This script itself runs as SYSTEM (Intune "Run as System") or as an
-# elevated admin session (the self-elevation block below) - either way, a
-# different, non-interactive session from the logged-on user's desktop.
-# Start-Process from a SYSTEM/elevated context lands in that context's own
-# session (Session 0 for SYSTEM), not the user's session, so it cannot make
-# a GUI app appear or run correctly for the user. The standard way to run a
-# process in a specific logged-on user's session from such a context is a
-# Scheduled Task registered to run as that user - so this registers one,
-# runs it once immediately, and removes it again straight after.
 #
 # Changed in v21: v19 skipped this whole function if PanGPA was already
 # running, on the assumption that an already-running client had nothing
@@ -403,12 +403,33 @@ function Test-GlobalProtectConnectedNow {
 # automatically (assuming the Portal's Connect Method is a real Always On
 # mode) instead of waiting on a click.
 #
-# This version restarts PanGPA whenever it is running but not already
+# Changed in v23: v21's restart used the same Scheduled-Task launch
+# mechanism for every case, but the customer confirmed the mechanism
+# actually proven to work on the prior project was NOT a Scheduled Task -
+# it was a direct process restart. That distinction matters because all
+# real-hardware testing of this script so far has been someone running it
+# interactively as an elevated Administrator, not via Intune's "Run as
+# System". In that interactive case there is no Session 0 isolation to
+# work around - a UAC-elevated process still runs in the same session as
+# the logged-on user - so the Scheduled Task indirection was unnecessary
+# complexity, and possibly itself a reason a Scheduled-Task-launched
+# PanGPA behaves differently than one started the normal way. The
+# Scheduled Task mechanism is still genuinely required for the actual
+# Intune "Run as System" production deployment, where this script really
+# does run in Session 0. So this now branches on Test-RunningAsSystem:
+# SYSTEM context keeps the Scheduled Task approach (the only way to reach
+# the user's session from Session 0); any other context (an admin running
+# this interactively, matching every real test done so far) uses a direct
+# Stop-Process + Start-Process instead, matching the mechanism actually
+# confirmed to work.
+#
+# Both paths restart PanGPA whenever it is running but not already
 # connected, instead of leaving it alone - but only after confirming the
-# client executable exists and a logged-on user can be identified, so an
-# already-running (even if stale) client is never killed unless we can
-# actually relaunch it. If GlobalProtect is already connected, this leaves
-# it running untouched rather than disrupting a working session.
+# client executable exists (and, for the SYSTEM path, that a logged-on
+# user can be identified), so an already-running (even if stale) client is
+# never killed unless we can actually relaunch it. If GlobalProtect is
+# already connected, this leaves it running untouched rather than
+# disrupting a working session.
 function Start-GlobalProtectClientForUser {
     param (
         [string]$GlobalProtectClientPath = "C:\Program Files\Palo Alto Networks\GlobalProtect\PanGPA.exe"
@@ -426,40 +447,69 @@ function Start-GlobalProtectClientForUser {
             return $false
         }
 
-        $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-        $loggedOnUser = $computerSystem.UserName
-
-        if ([string]::IsNullOrWhiteSpace($loggedOnUser)) {
-            Write-Log "Could not determine a logged-on interactive user (no one may be logged on yet). Skipping automatic GlobalProtect client launch - it will need to be opened manually, or this will resolve itself the next time someone logs on interactively."
-            return $false
-        }
-
         $existingProcess = Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue
-        if ($existingProcess) {
-            Write-Log "GlobalProtect client (PanGPA.exe) is running but not connected - restarting it so it picks up the current Portal/Prelogon registry configuration."
-            Stop-Process -Name "PanGPA" -Force -ErrorAction SilentlyContinue
-            Wait-ForCondition -Condition { -not (Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue) } -MaxWaitSeconds 15 -PollIntervalSeconds 3 | Out-Null
-        }
 
-        Write-Log "Launching GlobalProtect client for logged-on user '$loggedOnUser' via a temporary Scheduled Task..."
+        if (Test-RunningAsSystem) {
+            # Running as SYSTEM (e.g. Intune "Run as System") - a direct
+            # Start-Process here would land in Session 0, invisible to the
+            # interactive user, so a Scheduled Task registered to run as
+            # that user is required to cross into their session.
+            $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+            $loggedOnUser = $computerSystem.UserName
 
-        $taskName = "TEPL-Temp-Launch-GlobalProtect"
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            if ([string]::IsNullOrWhiteSpace($loggedOnUser)) {
+                Write-Log "Could not determine a logged-on interactive user (no one may be logged on yet). Skipping automatic GlobalProtect client launch - it will need to be opened manually, or this will resolve itself the next time someone logs on interactively."
+                return $false
+            }
 
-        $action = New-ScheduledTaskAction -Execute $GlobalProtectClientPath
-        $principal = New-ScheduledTaskPrincipal -UserId $loggedOnUser -LogonType Interactive
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
+            if ($existingProcess) {
+                Write-Log "GlobalProtect client (PanGPA.exe) is running but not connected - restarting it so it picks up the current Portal/Prelogon registry configuration."
+                Stop-Process -Name "PanGPA" -Force -ErrorAction SilentlyContinue
+                Wait-ForCondition -Condition { -not (Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue) } -MaxWaitSeconds 15 -PollIntervalSeconds 3 | Out-Null
+            }
 
-        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
-        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+            Write-Log "Launching GlobalProtect client for logged-on user '$loggedOnUser' via a temporary Scheduled Task (running as SYSTEM)..."
 
-        if (Wait-ForCondition -Condition { Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue } -MaxWaitSeconds 30 -PollIntervalSeconds 5) {
-            Write-Log "GlobalProtect client launched successfully for user '$loggedOnUser'."
+            $taskName = "TEPL-Temp-Launch-GlobalProtect"
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+            $action = New-ScheduledTaskAction -Execute $GlobalProtectClientPath
+            $principal = New-ScheduledTaskPrincipal -UserId $loggedOnUser -LogonType Interactive
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
+
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+            Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+
+            if (Wait-ForCondition -Condition { Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue } -MaxWaitSeconds 30 -PollIntervalSeconds 5) {
+                Write-Log "GlobalProtect client launched successfully for user '$loggedOnUser'."
+            } else {
+                Write-Log "GlobalProtect client launch task ran, but PanGPA.exe was not confirmed running within 30 seconds. The user may need to open GlobalProtect manually."
+            }
+
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
         } else {
-            Write-Log "GlobalProtect client launch task ran, but PanGPA.exe was not confirmed running within 30 seconds. The user may need to open GlobalProtect manually."
+            # Running interactively (e.g. an admin ran this script
+            # directly, elevated, rather than via Intune "Run as System")
+            # - the process already lands in the same session as the
+            # logged-on user, so a direct restart is enough. This is the
+            # exact mechanism confirmed to work on the prior project.
+            if ($existingProcess) {
+                Write-Log "GlobalProtect client (PanGPA.exe) is running but not connected - restarting it directly so it picks up the current Portal/Prelogon registry configuration."
+                Stop-Process -Name "PanGPA" -Force -ErrorAction SilentlyContinue
+                Wait-ForCondition -Condition { -not (Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue) } -MaxWaitSeconds 15 -PollIntervalSeconds 3 | Out-Null
+            } else {
+                Write-Log "Launching GlobalProtect client directly (this script is running interactively, not as SYSTEM)."
+            }
+
+            Start-Process -FilePath $GlobalProtectClientPath
+
+            if (Wait-ForCondition -Condition { Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue } -MaxWaitSeconds 30 -PollIntervalSeconds 5) {
+                Write-Log "GlobalProtect client launched successfully."
+            } else {
+                Write-Log "GlobalProtect client launch did not confirm PanGPA.exe running within 30 seconds. The user may need to open GlobalProtect manually."
+            }
         }
 
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
         return $true
     } catch {
         Write-Log "Could not launch/restart GlobalProtect client for the interactive user: $_. The user may need to open GlobalProtect manually once (the Portal is already configured, so no typing should be needed)."
