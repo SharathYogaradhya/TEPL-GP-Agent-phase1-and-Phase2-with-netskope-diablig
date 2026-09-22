@@ -289,94 +289,6 @@ function Install-GlobalProtect {
     }
 }
 
-# New in v19: launches the GlobalProtect client app (PanGPA.exe) in the
-# logged-on interactive user's own desktop session.
-#
-# Real-machine field report (2026-09-22): on a machine where GlobalProtect
-# was pre-installed by IT (not via this script) and the user had never
-# actually opened it, Phase2 configured the Portal/Prelogon registry values
-# correctly and restarted the PanGPS service - but the user still had to
-# manually open GlobalProtect and click Connect. They confirmed the Portal
-# field was already correctly populated (no typing needed), so the registry
-# config was right; what was missing was the client app itself ever running.
-# Restart-Service only restarts the PanGPS background service - it does not
-# launch PanGPA.exe (the tray/UI process a user actually interacts with),
-# and without that process running there is nothing to read our config and
-# initiate a connection.
-#
-# This script itself runs as SYSTEM (Intune "Run as System") or as an
-# elevated admin session (the self-elevation block below) - either way, a
-# different, non-interactive session from the logged-on user's desktop.
-# Start-Process from a SYSTEM/elevated context lands in that context's own
-# session (Session 0 for SYSTEM), not the user's session, so it cannot make
-# a GUI app appear or run correctly for the user. The standard way to run a
-# process in a specific logged-on user's session from such a context is a
-# Scheduled Task registered to run as that user - so this registers one,
-# runs it once immediately, and removes it again straight after.
-#
-# NOTE (2026-09-22, real-machine test of v19): this successfully launches
-# the client - the user confirmed the GlobalProtect window now opens on its
-# own with the Portal field correctly pre-filled - but the user still had to
-# click Connect for the tunnel to come up. That remaining click is NOT
-# something this function (or any local script) controls: whether the
-# client auto-connects once running, versus waiting for a manual click, is
-# governed by the "Connect Method" setting in the GlobalProtect Portal's
-# Agent Configuration (e.g. "On-demand" vs "User-logon (Always On)"), which
-# is a server-side Prisma Access Portal setting, not a local registry value.
-# If a fully unattended connection is required, that setting needs to be
-# checked/changed by whoever administers the Portal - this function's job
-# (getting the client running and pointed at the right portal) is complete
-# either way.
-function Start-GlobalProtectClientForUser {
-    param (
-        [string]$GlobalProtectClientPath = "C:\Program Files\Palo Alto Networks\GlobalProtect\PanGPA.exe"
-    )
-
-    try {
-        if (Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue) {
-            Write-Log "GlobalProtect client (PanGPA.exe) is already running. No need to launch it."
-            return $true
-        }
-
-        if (-not (Test-Path -Path $GlobalProtectClientPath)) {
-            Write-Log "GlobalProtect client executable not found at $GlobalProtectClientPath. Cannot launch it automatically - the user will need to open GlobalProtect manually (the Portal is already configured, so no typing should be needed)."
-            return $false
-        }
-
-        $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
-        $loggedOnUser = $computerSystem.UserName
-
-        if ([string]::IsNullOrWhiteSpace($loggedOnUser)) {
-            Write-Log "Could not determine a logged-on interactive user (no one may be logged on yet). Skipping automatic GlobalProtect client launch - it will need to be opened manually, or this will resolve itself the next time someone logs on interactively."
-            return $false
-        }
-
-        Write-Log "Launching GlobalProtect client for logged-on user '$loggedOnUser' via a temporary Scheduled Task..."
-
-        $taskName = "TEPL-Temp-Launch-GlobalProtect"
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-
-        $action = New-ScheduledTaskAction -Execute $GlobalProtectClientPath
-        $principal = New-ScheduledTaskPrincipal -UserId $loggedOnUser -LogonType Interactive
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
-
-        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
-        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
-
-        if (Wait-ForCondition -Condition { Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue } -MaxWaitSeconds 30 -PollIntervalSeconds 5) {
-            Write-Log "GlobalProtect client launched successfully for user '$loggedOnUser'."
-        } else {
-            Write-Log "GlobalProtect client launch task ran, but PanGPA.exe was not confirmed running within 30 seconds. The user may need to open GlobalProtect manually."
-        }
-
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-        return $true
-    } catch {
-        Write-Log "Could not launch GlobalProtect client for the interactive user: $_. The user may need to open GlobalProtect manually once (the Portal is already configured, so no typing should be needed)."
-        return $false
-    }
-}
-
 # Returns $true if the given IPv4 address falls within the given CIDR
 # range (e.g. "10.173.0.0/16"). Used to confirm a tunnel IP actually
 # belongs to the known GlobalProtect assignment range, not just any
@@ -416,6 +328,145 @@ function Test-IPInCidrRange {
     return $true
 }
 
+# Returns the GlobalProtect tunnel IPv4 address if it is connected right now
+# (a single, immediate check - no polling/waiting), or $null if not: service
+# running, virtual adapter up, and its IP within the confirmed tunnel range.
+# New in v21, factored out of Test-GlobalProtectConnected so the same
+# signal-check logic can be reused for a single-shot check (see
+# Start-GlobalProtectClientForUser below) without misusing that function's
+# polling loop or its Netskope-specific log message.
+function Test-GlobalProtectConnectedNow {
+    param (
+        [string]$GPTunnelSubnetCidr = "10.173.0.0/16"
+    )
+
+    $service = Get-Service -Name "PanGPS" -ErrorAction SilentlyContinue
+    if (-not ($service -and $service.Status -eq "Running")) {
+        return $null
+    }
+
+    $gpAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
+        Where-Object { $_.InterfaceDescription -like "*GlobalProtect*" -or $_.InterfaceDescription -like "*PANGP*" } |
+        Select-Object -First 1
+
+    if (-not $gpAdapter -or $gpAdapter.Status -ne "Up") {
+        return $null
+    }
+
+    $ipInfo = Get-NetIPAddress -InterfaceIndex $gpAdapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { Test-IPInCidrRange -IPAddress $_.IPAddress -Cidr $GPTunnelSubnetCidr } |
+        Select-Object -First 1
+
+    if ($ipInfo) {
+        return $ipInfo.IPAddress
+    }
+    return $null
+}
+
+# New in v19: launches the GlobalProtect client app (PanGPA.exe) in the
+# logged-on interactive user's own desktop session.
+#
+# Real-machine field report (2026-09-22): on a machine where GlobalProtect
+# was pre-installed by IT (not via this script) and the user had never
+# actually opened it, Phase2 configured the Portal/Prelogon registry values
+# correctly and restarted the PanGPS service - but the user still had to
+# manually open GlobalProtect and click Connect. They confirmed the Portal
+# field was already correctly populated (no typing needed), so the registry
+# config was right; what was missing was the client app itself ever running.
+# Restart-Service only restarts the PanGPS background service - it does not
+# launch PanGPA.exe (the tray/UI process a user actually interacts with),
+# and without that process running there is nothing to read our config and
+# initiate a connection.
+#
+# This script itself runs as SYSTEM (Intune "Run as System") or as an
+# elevated admin session (the self-elevation block below) - either way, a
+# different, non-interactive session from the logged-on user's desktop.
+# Start-Process from a SYSTEM/elevated context lands in that context's own
+# session (Session 0 for SYSTEM), not the user's session, so it cannot make
+# a GUI app appear or run correctly for the user. The standard way to run a
+# process in a specific logged-on user's session from such a context is a
+# Scheduled Task registered to run as that user - so this registers one,
+# runs it once immediately, and removes it again straight after.
+#
+# Changed in v21: v19 skipped this whole function if PanGPA was already
+# running, on the assumption that an already-running client had nothing
+# left to do. Real-machine testing showed that assumption was wrong: v19
+# did get the client running with the Portal field correctly pre-filled,
+# but it still required a manual Connect click. A prior, separate project
+# had already hit and solved exactly this - GlobalProtect reads its
+# Portal/Prelogon configuration from the registry at its own process
+# startup, not continuously, so an instance that was already running
+# *before* Install-GlobalProtect wrote the current registry values keeps
+# using whatever (or nothing) it read before, and never picks up the fresh
+# config without being restarted. The fix confirmed on that prior project:
+# restart the client after writing the registry, and it connects
+# automatically (assuming the Portal's Connect Method is a real Always On
+# mode) instead of waiting on a click.
+#
+# This version restarts PanGPA whenever it is running but not already
+# connected, instead of leaving it alone - but only after confirming the
+# client executable exists and a logged-on user can be identified, so an
+# already-running (even if stale) client is never killed unless we can
+# actually relaunch it. If GlobalProtect is already connected, this leaves
+# it running untouched rather than disrupting a working session.
+function Start-GlobalProtectClientForUser {
+    param (
+        [string]$GlobalProtectClientPath = "C:\Program Files\Palo Alto Networks\GlobalProtect\PanGPA.exe"
+    )
+
+    try {
+        $existingTunnelIp = Test-GlobalProtectConnectedNow
+        if ($existingTunnelIp) {
+            Write-Log "GlobalProtect is already connected (tunnel IP $existingTunnelIp). Leaving the running client alone."
+            return $true
+        }
+
+        if (-not (Test-Path -Path $GlobalProtectClientPath)) {
+            Write-Log "GlobalProtect client executable not found at $GlobalProtectClientPath. Cannot launch/restart it automatically - the user will need to open GlobalProtect manually (the Portal is already configured, so no typing should be needed)."
+            return $false
+        }
+
+        $computerSystem = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+        $loggedOnUser = $computerSystem.UserName
+
+        if ([string]::IsNullOrWhiteSpace($loggedOnUser)) {
+            Write-Log "Could not determine a logged-on interactive user (no one may be logged on yet). Skipping automatic GlobalProtect client launch - it will need to be opened manually, or this will resolve itself the next time someone logs on interactively."
+            return $false
+        }
+
+        $existingProcess = Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue
+        if ($existingProcess) {
+            Write-Log "GlobalProtect client (PanGPA.exe) is running but not connected - restarting it so it picks up the current Portal/Prelogon registry configuration."
+            Stop-Process -Name "PanGPA" -Force -ErrorAction SilentlyContinue
+            Wait-ForCondition -Condition { -not (Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue) } -MaxWaitSeconds 15 -PollIntervalSeconds 3 | Out-Null
+        }
+
+        Write-Log "Launching GlobalProtect client for logged-on user '$loggedOnUser' via a temporary Scheduled Task..."
+
+        $taskName = "TEPL-Temp-Launch-GlobalProtect"
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+
+        $action = New-ScheduledTaskAction -Execute $GlobalProtectClientPath
+        $principal = New-ScheduledTaskPrincipal -UserId $loggedOnUser -LogonType Interactive
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Hidden
+
+        Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings -Force -ErrorAction Stop | Out-Null
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+
+        if (Wait-ForCondition -Condition { Get-Process -Name "PanGPA" -ErrorAction SilentlyContinue } -MaxWaitSeconds 30 -PollIntervalSeconds 5) {
+            Write-Log "GlobalProtect client launched successfully for user '$loggedOnUser'."
+        } else {
+            Write-Log "GlobalProtect client launch task ran, but PanGPA.exe was not confirmed running within 30 seconds. The user may need to open GlobalProtect manually."
+        }
+
+        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+        return $true
+    } catch {
+        Write-Log "Could not launch/restart GlobalProtect client for the interactive user: $_. The user may need to open GlobalProtect manually once (the Portal is already configured, so no typing should be needed)."
+        return $false
+    }
+}
+
 # Function to verify GlobalProtect is actually connected before we touch
 # Netskope at all. Netskope is the user's only fallback connectivity until
 # this is confirmed, so we do not disable or uninstall it on a guess.
@@ -428,6 +479,11 @@ function Test-IPInCidrRange {
 # also requiring the adapter's IP to fall within that confirmed range
 # (rather than just excluding link-local addresses) is a precise,
 # environment-specific signal that the tunnel is actually established.
+#
+# Changed in v21: the actual signal-check logic now lives in
+# Test-GlobalProtectConnectedNow (shared with Start-GlobalProtectClientForUser
+# above); this function is unchanged in behavior, just polls that shared
+# check instead of repeating the same inline logic.
 function Test-GlobalProtectConnected {
     param (
         [int]$MaxWaitSeconds = 120,
@@ -439,32 +495,8 @@ function Test-GlobalProtectConnected {
 
     $elapsed = 0
     while ($elapsed -le $MaxWaitSeconds) {
-        $service = Get-Service -Name "PanGPS" -ErrorAction SilentlyContinue
-        $serviceRunning = $service -and $service.Status -eq "Running"
-
-        $gpAdapterUp = $false
-        $gpAdapterHasTunnelIp = $false
-        $tunnelIp = $null
-
-        if ($serviceRunning) {
-            $gpAdapter = Get-NetAdapter -ErrorAction SilentlyContinue |
-                Where-Object { $_.InterfaceDescription -like "*GlobalProtect*" -or $_.InterfaceDescription -like "*PANGP*" } |
-                Select-Object -First 1
-
-            if ($gpAdapter) {
-                $gpAdapterUp = $gpAdapter.Status -eq "Up"
-
-                if ($gpAdapterUp) {
-                    $ipInfo = Get-NetIPAddress -InterfaceIndex $gpAdapter.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                        Where-Object { Test-IPInCidrRange -IPAddress $_.IPAddress -Cidr $GPTunnelSubnetCidr } |
-                        Select-Object -First 1
-                    $gpAdapterHasTunnelIp = [bool]$ipInfo
-                    if ($ipInfo) { $tunnelIp = $ipInfo.IPAddress }
-                }
-            }
-        }
-
-        if ($serviceRunning -and $gpAdapterUp -and $gpAdapterHasTunnelIp) {
+        $tunnelIp = Test-GlobalProtectConnectedNow -GPTunnelSubnetCidr $GPTunnelSubnetCidr
+        if ($tunnelIp) {
             Write-Log "GlobalProtect service is running, the virtual adapter is up, and it has a tunnel IP address ($tunnelIp) within the confirmed range ($GPTunnelSubnetCidr). Treating GlobalProtect as connected."
             return $true
         }
@@ -867,16 +899,16 @@ Install-Certificates -trustedRootCertFilePath $trustedRootCertFilePath -decrypti
 # configures Portal + Prelogon for automatic, no-user-interaction connection)
 Install-GlobalProtect -GlobalProtectInstallerPath $GlobalProtectInstallerPath -portal_fqdn $portal_fqdn
 
-# New in v19: launch the GlobalProtect client app itself for the logged-on
-# user. Configuring the Portal/Prelogon registry values and restarting the
-# PanGPS background service is not enough to get an automatic connection on
-# a machine where the client has never actually been opened by that user -
-# see Start-GlobalProtectClientForUser's comment for the real-machine field
-# report this fixes. This is best-effort: if it can't determine a logged-on
-# user (e.g. running at a machine's first boot before anyone signs in), it
-# logs why and moves on - the registry config is still correct, so the user
-# will only need to open GlobalProtect and click Connect once, with no
-# typing required.
+# New in v19, changed in v21: launch (or restart, if already running but not
+# connected) the GlobalProtect client app itself for the logged-on user.
+# Configuring the Portal/Prelogon registry values and restarting the PanGPS
+# background service is not enough to get an automatic connection if the
+# client was already running before that registry write - see
+# Start-GlobalProtectClientForUser's comment for the real-machine field
+# reports (v19 and v21) behind this. This is best-effort: if it can't
+# determine a logged-on user or find the client executable, it logs why and
+# leaves any existing client alone rather than risk leaving the user with
+# no running client at all.
 Start-GlobalProtectClientForUser | Out-Null
 
 # Only touch Netskope once GlobalProtect is confirmed connected. If we
