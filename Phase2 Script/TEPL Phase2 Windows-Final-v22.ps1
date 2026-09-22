@@ -747,27 +747,23 @@ function Invoke-NetskopeUninstaller {
 }
 
 # Function to uninstall the Netskope client.
-# Step 1: try a plain uninstall with no password.
-# Step 2: only if step 1 did not actually remove the client, retry once
-#         with the supplied disable password via the confirmed PASSWORD
-#         MSI property (treating the failure as a likely tamper-protection
-#         block).
-# Each step is verified by re-checking whether Netskope is still present,
-# not just by trusting the uninstaller's exit code.
 #
-# Changed in v20: before spending the password retry, re-check whether the
-# Windows Installer registration disappeared out from under the first
-# attempt. Real-machine testing (2026-09-22, with the disable password
-# confirmed correct and identical across the whole org - so a wrong
-# password was ruled out) showed exit code 1602 ("user cancelled") on
-# attempt 1, then 1605 ("this action is only valid for products that are
-# currently installed") on attempt 2 - meaning tamper protection let the
-# MSI transaction strip the product's registry/ARP entry while blocking the
-# actual removal of its files/services mid-transaction, leaving a stuck,
-# partially-uninstalled client that a same-product-code retry can never fix.
-# Detecting this specific state up front avoids wasting the retry and,
-# more importantly, avoids the old message wrongly suggesting the password
-# might be incorrect when it demonstrably is not.
+# Changed in v22: removed the initial no-password attempt entirely. The
+# customer confirmed tamper protection enforcement is always active in this
+# environment and the disable password is always required - identical for
+# every user and device - so a no-password attempt was guaranteed to fail
+# on every single deployment. That doomed attempt still cost real time on
+# every run (the msiexec call itself, plus the ~90-second
+# Wait-ForNetskopeRemoved poll that followed it) before ever reaching the
+# password-based attempt that could actually work. This goes straight to
+# the password-based uninstall as the only attempt.
+#
+# Still verified by re-checking whether Netskope is actually gone rather
+# than trusting the uninstaller's exit code, and still checks for the same
+# stuck/partially-uninstalled state introduced in v20 (Windows Installer
+# registration stripped while files/services remain) - tamper protection
+# blocking a password-included attempt mid-transaction is just as possible
+# as it was for the no-password attempt.
 function Uninstall-NetskopeAgent {
     param (
         [string]$NetskopeDisablePassword
@@ -792,44 +788,36 @@ function Uninstall-NetskopeAgent {
         Write-Log "Found Netskope entry: $($uninstallInfo.DisplayName)"
         $uninstallString = $uninstallInfo.UninstallString
 
-        # Step 1: simple uninstall, no password
-        Write-Log "Step 1: attempting a simple uninstall (no password)."
-        $exitCode = Invoke-NetskopeUninstaller -UninstallString $uninstallString -NetskopeDisablePassword ""
+        if ([string]::IsNullOrWhiteSpace($NetskopeDisablePassword)) {
+            Write-Log "No disable password is configured, and this tenant is confirmed to always enforce tamper protection - an uninstall attempt without one cannot succeed. Set `$netskopeDisablePassword before re-running."
+            return
+        }
+
+        Write-Log "Attempting uninstall with the configured disable password (tamper protection enforcement is confirmed always active in this environment, so the no-password attempt is skipped)."
+        $exitCode = Invoke-NetskopeUninstaller -UninstallString $uninstallString -NetskopeDisablePassword $NetskopeDisablePassword
         $removed = Wait-ForNetskopeRemoved
 
         if ($exitCode -eq 0 -and $removed) {
-            Write-Log "Netskope client uninstalled successfully on the first attempt."
+            Write-Log "Netskope client uninstalled successfully."
             return
         }
 
-        Write-Log "Simple uninstall did not remove the client (exit code: $exitCode). This is consistent with tamper protection / enforcement being enabled."
+        Write-Log "Uninstall did not remove the client (exit code: $exitCode)."
         Write-TamperProtectionGuidance
 
-        # New in v20: check for the specific "stuck, partially uninstalled"
-        # state before spending the password retry - see this function's
-        # changelog comment above for the real exit codes that revealed it.
+        # Same stuck/partially-uninstalled state introduced in v20: tamper
+        # protection can strip the Windows Installer registration while
+        # still blocking the actual removal of files/services mid-
+        # transaction, leaving the client present but no longer considered
+        # "installed" by Windows Installer.
         $stillRegistered = Get-NetskopeUninstallInfo
         if (-not $stillRegistered -and (Test-Path -Path $script:NetskopeInstallFolder)) {
-            Write-Log "Netskope's Windows Installer registration is now gone, but its files/services are still present at $script:NetskopeInstallFolder - this is a partial, stuck uninstall left behind by tamper protection blocking the removal mid-transaction. A retry against the same product code cannot succeed from this state (Windows Installer no longer considers it installed). This is not a password problem - it requires either a fresh uninstall attempt after the Netskope admin fully disables tamper protection for this device, or a manual/admin-console-driven cleanup of the leftover files and services."
+            Write-Log "Netskope's Windows Installer registration is now gone, but its files/services are still present at $script:NetskopeInstallFolder - this is a partial, stuck uninstall left behind by tamper protection blocking the removal mid-transaction. This requires either a fresh uninstall attempt after the Netskope admin fully disables tamper protection for this device, or a manual/admin-console-driven cleanup of the leftover files and services."
             return
         }
 
-        if ([string]::IsNullOrWhiteSpace($NetskopeDisablePassword)) {
-            Write-Log "No disable password is configured, so a retry cannot be attempted. Uninstall failed - see guidance above."
-            return
-        }
-
-        # Step 2: retry once with the configured disable password
-        Write-Log "Step 2: retrying uninstall with the configured disable password."
-        $exitCode2 = Invoke-NetskopeUninstaller -UninstallString $uninstallString -NetskopeDisablePassword $NetskopeDisablePassword
-        $removed2 = Wait-ForNetskopeRemoved
-
-        if ($exitCode2 -eq 0 -and $removed2) {
-            Write-Log "Netskope client uninstalled successfully after retrying with the disable password."
-        } else {
-            Write-Log "Netskope client is still present after retrying with the disable password (exit code: $exitCode2)."
-            Write-Log "Either the configured password is incorrect, or removal requires an action from the Netskope admin console. See guidance above."
-        }
+        Write-Log "Netskope client is still present after the uninstall attempt (exit code: $exitCode)."
+        Write-Log "This could mean the configured password no longer matches this tenant's disable password, or removal requires an action from the Netskope admin console. See guidance above."
     } catch {
         Write-Log "Error uninstalling Netskope client: $_"
         if (Test-LooksLikeTamperProtection -errorText "$_") {

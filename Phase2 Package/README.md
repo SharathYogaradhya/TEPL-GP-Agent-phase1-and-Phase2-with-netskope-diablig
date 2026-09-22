@@ -1,11 +1,11 @@
 # Phase2 Package
 
-Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v21.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
+Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v22.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
 
 ## Deployment
 
 1. Copy this entire `Phase2 Package` folder anywhere on the target machine — **the folder can be named or placed anything**, it no longer has to be `C:\PaloAlto Package\`. The script finds its own certs/MSI relative to its own location (`$PSScriptRoot`), not a hardcoded path.
-2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v21.ps1` as Administrator.
+2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v22.ps1` as Administrator.
 3. Watch progress / verify success in `Installation Logs\PANW-Phase2-Logs.txt` (created inside this same folder).
 
 Netskope is only disabled/uninstalled once the script confirms GlobalProtect is actually connected (PanGPS running + tunnel adapter up + tunnel IP in `10.173.0.0/16`), waiting up to 5 minutes for that to happen (300 seconds, polling every 10s) to allow time for an interactive SSO/MFA login if the portal requires one. If that can't be confirmed within that window, Netskope is left untouched and the script says so in the log — re-run once GlobalProtect connects.
@@ -27,8 +27,12 @@ After each uninstall attempt, it also polls for up to 90 seconds to confirm Nets
 ├── Installation Logs\
 │   └── PANW-Phase2-Logs.txt       (created by the script on first run)
 └── Phase2 Script\
-    └── TEPL Phase2 Windows-Final-v21.ps1
+    └── TEPL Phase2 Windows-Final-v22.ps1
 ```
+
+**New in v22 — skips the no-password Netskope uninstall attempt entirely:** the customer confirmed tamper protection enforcement is always active in this environment and the disable password is always required — identical for every user and device. That means the no-password attempt introduced back when this logic was first written was guaranteed to fail on every single deployment, and it wasn't free: the failed msiexec call plus the ~90-second `Wait-ForNetskopeRemoved` poll that followed it ran to completion on every machine before the retry (the one that could actually work) even started.
+
+v22 removes the two-step structure and goes straight to the password-based uninstall as the only attempt — cutting that guaranteed-to-fail step (and its wait) out of every deployment. Everything else about verification is unchanged: it still re-checks whether Netskope is actually gone rather than trusting the exit code, and still detects the v20 stuck/partially-uninstalled state (Windows Installer registration stripped while files/services remain) if this single attempt is blocked mid-transaction. Verified against the real, unmodified function with 5 mock scenarios (direct success, normal failure, the stuck-state failure, no password configured, Netskope not installed) — all pass, confirming exactly one uninstall call per run in every case.
 
 **New in v21 — restarts a stale GlobalProtect client instead of leaving it alone, so Always On can actually take effect:** v19 got the GlobalProtect app to launch automatically with the Portal field correctly pre-filled, but the customer still had to click Connect. The Portal's Connect Method is confirmed set to **Pre-logon (Always On)**, which should mean zero clicks — so this pointed at something other than a missing portal setting. The cause: GlobalProtect reads its Portal/Prelogon configuration from the registry **at its own process startup only**, not continuously. If the client was already running *before* this script wrote the current registry values (e.g. GlobalProtect pre-installed by IT and already open), that instance keeps using whatever it read before and never picks up the fresh config — which is exactly consistent with needing a manual click. A prior, separate project had already hit and fixed this exact issue: restart the client after writing the registry.
 
@@ -53,8 +57,8 @@ While fixing this, `Install-GlobalProtect` was also brought up to the same stand
 
 Installs the GlobalProtect Prelogon Root CA certificate (`TEPL-PreLogon-CA.pem`, to the Trusted Root store) and the Prelogon Machine certificate (`TEPL-PreLogon-MachineCert.pfx`, to the Personal "My" store at both LocalMachine and CurrentUser) needed for Prelogon machine-certificate authentication. GlobalProtect fetches the cert from the machine (LocalMachine) store during the prelogon stage. The Machine cert must be a `.pfx` — a combined cert+encrypted-key `.pem` export was tested directly against this script's own certificate-loading code and loaded with `HasPrivateKey = False` (no error, but the private key silently dropped), so a plain `.pem`/`.der` export cannot be used for it.
 
-This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v21.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v21 in place.
+This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v22.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v22 in place.
 
 ## Getting a click-free GlobalProtect connection
 
-The Connect Method on the Portal's Agent Configuration is confirmed set to **Pre-logon (Always On)**, so a fully automatic connection (no click, ever) is the expected behavior, not an optional extra. v21's client-restart fix (above) addresses one real cause of the manual-click requirement — a stale, already-running client never picking up fresh registry config. If a click is still required after running v21, test with a real reboot rather than re-running the script in an already-logged-in session: Prelogon connects at the Windows logon screen, before any user session exists, using the machine certificate and the machine-level registry values this script writes — that mechanism can't be exercised or proven by watching the app mid-session, only by rebooting and observing whether the tunnel comes up automatically through/after the login screen.
+The Connect Method on the Portal's Agent Configuration is confirmed set to **Pre-logon (Always On)**, so a fully automatic connection (no click, ever) is the expected behavior, not an optional extra. v21's client-restart fix (above) addresses one real cause of the manual-click requirement — a stale, already-running client never picking up fresh registry config. If a click is still required after running v22, test with a real reboot rather than re-running the script in an already-logged-in session: Prelogon connects at the Windows logon screen, before any user session exists, using the machine certificate and the machine-level registry values this script writes — that mechanism can't be exercised or proven by watching the app mid-session, only by rebooting and observing whether the tunnel comes up automatically through/after the login screen.
