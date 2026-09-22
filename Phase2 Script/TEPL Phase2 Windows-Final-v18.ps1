@@ -141,7 +141,87 @@ function Install-Certificates {
 }
 
 
+# Returns $true if a GlobalProtect uninstall registry entry can be found.
+# Replaces the Get-WmiObject Win32_Product check used through v17: Win32_Product
+# is a known slow, deprecated WMI class whose enumeration has the side effect
+# of triggering a repair-install scan of every MSI-installed application on
+# the machine. This is the same fix already applied to Phase1 (v3+) - Phase2
+# had its own separate copy of Install-GlobalProtect that never got it.
+function Test-GlobalProtectInstalled {
+    $uninstallKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($keyPath in $uninstallKeys) {
+        $entry = Get-ItemProperty -Path $keyPath -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*GlobalProtect*" }
+        if ($entry) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+# Polls a named condition (a script block returning $true/$false) instead of
+# a single fixed sleep. Same helper already used in Phase1 (v3+).
+function Wait-ForCondition {
+    param (
+        [scriptblock]$Condition,
+        [int]$MaxWaitSeconds = 60,
+        [int]$PollIntervalSeconds = 5
+    )
+
+    $elapsed = 0
+    while ($elapsed -le $MaxWaitSeconds) {
+        if (& $Condition) {
+            return $true
+        }
+        Start-Sleep -Seconds $PollIntervalSeconds
+        $elapsed += $PollIntervalSeconds
+    }
+
+    return & $Condition
+}
+
+# Ensures a registry key exists before writing a value to it. Set-ItemProperty
+# cannot create a missing key - it only sets a value on a key that already
+# exists. A real-machine test (2026-09-22) showed the HKCU GlobalProtect key
+# not existing (GlobalProtect was already installed on that machine, but this
+# user account had apparently never actually launched it - the per-user HKCU
+# key is created by the running client, not by the MSI installer), so
+# Set-ItemProperty threw "Cannot find path... because it does not exist." As a
+# non-terminating error, the script did not stop - it printed the error and
+# then logged "configured" right after anyway, which was false: the value was
+# never actually set for that user.
+function Set-RegistryValueEnsuringKeyExists {
+    param (
+        [string]$Path,
+        [string]$Name,
+        $Value
+    )
+
+    if (-not (Test-Path -Path $Path)) {
+        New-Item -Path $Path -Force | Out-Null
+    }
+    Set-ItemProperty -Path $Path -Name $Name -Value $Value
+}
+
 # Function to install GlobalProtect and configure settings
+#
+# Changed in v18:
+# - Replaced the Get-WmiObject Win32_Product "already installed" check with
+#   Test-GlobalProtectInstalled (registry-based), matching Phase1 v3+.
+# - The MSI install now captures and checks its own exit code, and polls for
+#   the registry entry to appear instead of a fixed 45-second sleep, matching
+#   Phase1 v2/v3.
+# - All 4 registry writes (HKCU Portal/Prelogon, HKLM Portal/Prelogon) now go
+#   through Set-RegistryValueEnsuringKeyExists, which creates the key first if
+#   it's missing - see that function's comment for the real-machine failure
+#   this fixes.
+# - Restart-Service now uses -ErrorAction Stop and polls for the service to
+#   actually reach Running, matching Phase1 v3/v4.
 function Install-GlobalProtect {
     param (
         [string]$GlobalProtectInstallerPath,
@@ -151,18 +231,22 @@ function Install-GlobalProtect {
     try {
         Write-Log "Installing and configuring GlobalProtect..."
 
-        # Check if GlobalProtect is already installed
-        $globalProtectInstalled = Get-WmiObject -Query "SELECT * FROM Win32_Product WHERE Name = 'GlobalProtect'" | ForEach-Object {
-            $_.Name -eq "GlobalProtect"
-        }
-
-        if ($globalProtectInstalled) {
+        if (Test-GlobalProtectInstalled) {
             Write-Log "GlobalProtect is already installed. Skipping installation."
         } else {
-            # Run the GlobalProtect installer silently
-            Start-Process msiexec.exe -ArgumentList "/i `"$GlobalProtectInstallerPath`" /quiet /norestart" -Wait
-            Start-Sleep -Seconds 45
-            Write-Log "GlobalProtect installed successfully."
+            # Run the GlobalProtect installer silently, capturing its exit code
+            $proc = Start-Process msiexec.exe -ArgumentList "/i `"$GlobalProtectInstallerPath`" /quiet /norestart" -Wait -PassThru
+
+            if ($proc.ExitCode -ne 0) {
+                Write-Log "GlobalProtect installer failed (msiexec exit code: $($proc.ExitCode)). Installation did not complete successfully."
+                throw "GlobalProtect MSI install failed with exit code $($proc.ExitCode)."
+            }
+
+            if (Wait-ForCondition -Condition { Test-GlobalProtectInstalled } -MaxWaitSeconds 60 -PollIntervalSeconds 5) {
+                Write-Log "GlobalProtect installed successfully (msiexec exit code: 0, registry entry confirmed)."
+            } else {
+                Write-Log "msiexec reported success (exit code 0), but no GlobalProtect registry entry was found within 60 seconds of waiting. Proceeding, but this is unexpected."
+            }
         }
 
         # Set the registry key paths for the current user
@@ -172,11 +256,11 @@ function Install-GlobalProtect {
         $preLogonRegistryValueName = "Prelogon"
 
         # Update the registry value to preconfigure the portal FQDN at the user level
-        Set-ItemProperty -Path $userLevelPortalRegistryPath -Name $portalRegistryValueName -Value $portal_fqdn
+        Set-RegistryValueEnsuringKeyExists -Path $userLevelPortalRegistryPath -Name $portalRegistryValueName -Value $portal_fqdn
         Write-Log "User level portal FQDN configured."
 
         # Update the registry value to enable pre-logon at the user level
-        Set-ItemProperty -Path $userLevelPreLogonRegistryPath -Name $preLogonRegistryValueName -Value 1
+        Set-RegistryValueEnsuringKeyExists -Path $userLevelPreLogonRegistryPath -Name $preLogonRegistryValueName -Value 1
         Write-Log "User level pre-logon enabled."
 
         # Set the registry key paths for the machine level
@@ -184,16 +268,21 @@ function Install-GlobalProtect {
         $machineLevelPreLogonRegistryPath = "HKLM:\SOFTWARE\Palo Alto Networks\GlobalProtect\PanSetup"
 
         # Update the registry value to preconfigure the portal FQDN at the machine level
-        Set-ItemProperty -Path $machineLevelPortalRegistryPath -Name $portalRegistryValueName -Value $portal_fqdn
+        Set-RegistryValueEnsuringKeyExists -Path $machineLevelPortalRegistryPath -Name $portalRegistryValueName -Value $portal_fqdn
         Write-Log "Machine level portal FQDN configured."
 
         # Update the registry value to enable pre-logon at the machine level
-        Set-ItemProperty -Path $machineLevelPreLogonRegistryPath -Name $preLogonRegistryValueName -Value 1
+        Set-RegistryValueEnsuringKeyExists -Path $machineLevelPreLogonRegistryPath -Name $preLogonRegistryValueName -Value 1
         Write-Log "Machine level pre-logon enabled."
 
         # Restart the GlobalProtect service to apply changes
-        Restart-Service -Name PanGPS -Force
-        Write-Log "GlobalProtect configured and service restarted successfully."
+        Restart-Service -Name PanGPS -Force -ErrorAction Stop
+
+        if (Wait-ForCondition -Condition { (Get-Service -Name PanGPS -ErrorAction SilentlyContinue).Status -eq "Running" } -MaxWaitSeconds 60 -PollIntervalSeconds 5) {
+            Write-Log "GlobalProtect configured and service restarted successfully, confirmed Running."
+        } else {
+            Write-Log "GlobalProtect service (PanGPS) did not reach Running status within 60 seconds of restarting. It may need more time or a manual check."
+        }
     } catch {
         Write-Log "Error installing or configuring GlobalProtect: $_"
         exit 1
