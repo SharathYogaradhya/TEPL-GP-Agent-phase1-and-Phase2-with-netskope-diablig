@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# TEPL Phase2 macOS v1
+# TEPL Phase2 macOS v2
 #
 # Everything Phase1 macOS does (certs + GlobalProtect install), plus
 # Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity
@@ -21,13 +21,27 @@
 #   range check, but the exact interface identification needs real-
 #   hardware confirmation (utun numbering is not predictable, and other
 #   VPN clients also use utun interfaces).
-# - Netskope handling: NOT IMPLEMENTED. Zero confirmed facts were
-#   available about the macOS Netskope client's install path, daemon
-#   labels, or uninstall/tamper-protection mechanism at the time this was
-#   written. Rather than guess at commands that stop/uninstall a security
-#   agent, this logs clearly that it is skipped and does nothing further.
-#   Fill in Uninstall-NetskopeAgent-equivalent logic once those facts are
-#   confirmed - see the README.
+# - Netskope handling: New in v2, implemented from Netskope's own official
+#   "Uninstalling the Netskope Client" documentation (macOS section) - the
+#   install path, uninstaller invocation, and System Extension identity
+#   below are all sourced directly from that document, not guessed. Two
+#   things from that same document still need real-hardware/customer-side
+#   confirmation:
+#   1. The customer's Intune tenant needs a macOS Configuration Profile
+#      marking Netskope's System Extension as "Removable" (see
+#      NETSKOPE_EXTENSION_TEAM_ID / NETSKOPE_EXTENSION_BUNDLE_ID below) -
+#      without it, the documented uninstall command may still trigger an
+#      interactive credential-approval prompt instead of running silently.
+#      This is an Intune-side setup step this script cannot perform.
+#   2. The document itself is inconsistent about the exact System
+#      Extension bundle ID between its JAMF/Omnissa section
+#      ("com.netskope.client.Netskope-Client.NetskopeClientMacAppProxy",
+#      with a hyphen) and its Intune section
+#      ("com.netskope.client.NetskopeClient.NetskopeClientMacAppProxy",
+#      without one). NETSKOPE_EXTENSION_BUNDLE_ID below uses the Intune
+#      section's spelling since that matches this deployment's tooling,
+#      but this should be confirmed against a real installed Mac
+#      (systemextensionsctl list) before relying on it.
 
 set -uo pipefail
 
@@ -312,11 +326,99 @@ wait_for_globalprotect_connected() {
     return 1
 }
 
-# --- Netskope handling: NOT IMPLEMENTED - see header notice ---------------
-uninstall_netskope_agent() {
-    write_log "Netskope macOS handling is not yet implemented - no confirmed install path, daemon labels, or uninstall/tamper-protection mechanism were available for the macOS Netskope client when this script was written. Skipping Netskope entirely on this run - it has not been touched. Provide those details to complete this function before relying on it."
+# --- Netskope handling ------------------------------------------------------
+#
+# New in v2: implemented from Netskope's own official "Uninstalling the
+# Netskope Client" documentation (macOS section), not guessed. See the
+# header comment for the two things that document leaves genuinely
+# unconfirmed (the Intune Removable-System-Extension setup, and a bundle-ID
+# spelling inconsistency within the document itself).
+
+# Confirmed from the official doc's own Kandji detection script: this is
+# where the Netskope client installs. That script detects it via `mdfind`
+# scoped to this folder; this uses a direct path check instead, which
+# tests the same thing without depending on Spotlight indexing being current.
+NETSKOPE_APP_PATH="/Library/Application Support/Netskope Client.app"
+
+is_netskope_installed() {
+    [[ -e "$NETSKOPE_APP_PATH" ]]
 }
-# --- End Netskope handling placeholder -------------------------------------
+
+# Confirmed from the official doc: Netskope is removed by running its own
+# bundled uninstaller app directly, passing "uninstall_me" and the
+# tenant's uninstall password as arguments - this is the macOS equivalent
+# of Windows' `msiexec /x ... PASSWORD=...`.
+NETSKOPE_UNINSTALLER="/Applications/Remove Netskope Client.app/Contents/MacOS/Remove Netskope Client"
+
+# NEEDS CONFIRMATION (Intune-side - not something this script can do):
+# the official doc notes that removing Netskope's System Extension can
+# prompt the user for credentials (twice, on macOS 11) unless an MDM
+# Configuration Profile has already marked it "Removable". For Intune,
+# that means a macOS Configuration Profile (Settings catalog > System
+# Configuration > System Extensions > Removable System Extensions) needs
+# to exist with this Team Identifier and Bundle Identifier, created by
+# whoever administers your Intune tenant - this script only performs the
+# uninstall itself, not that prerequisite MDM setup.
+NETSKOPE_EXTENSION_TEAM_ID="24W52P9M7W"
+# NEEDS CONFIRMATION: the source document gives two different spellings of
+# this bundle ID in different sections (see header comment) - this is the
+# Intune section's spelling. Confirm against a real installed Mac with
+# `systemextensionsctl list` before relying on it for the Configuration
+# Profile.
+NETSKOPE_EXTENSION_BUNDLE_ID="com.netskope.client.NetskopeClient.NetskopeClientMacAppProxy"
+
+# Polls until Netskope is confirmed removed or the wait window expires,
+# rather than trusting the uninstaller's exit code alone - mirrors
+# Wait-ForNetskopeRemoved on Windows.
+wait_for_netskope_removed() {
+    local max_wait_seconds="${1:-90}"
+    local poll_interval_seconds="${2:-15}"
+    local elapsed=0
+
+    while [[ "$elapsed" -le "$max_wait_seconds" ]]; do
+        if ! is_netskope_installed; then
+            return 0
+        fi
+        sleep "$poll_interval_seconds"
+        elapsed=$((elapsed + poll_interval_seconds))
+    done
+
+    ! is_netskope_installed
+}
+
+uninstall_netskope_agent() {
+    local netskope_disable_password="${1:-}"
+
+    write_log "Attempting to uninstall Netskope client..."
+
+    if ! is_netskope_installed; then
+        write_log "Netskope client was not found on this machine (checked $NETSKOPE_APP_PATH). Nothing to uninstall."
+        return 0
+    fi
+
+    if [[ ! -x "$NETSKOPE_UNINSTALLER" ]]; then
+        write_log "Netskope appears to be installed (found $NETSKOPE_APP_PATH) but its uninstaller was not found at the expected path: $NETSKOPE_UNINSTALLER. Manual removal or an action from the Netskope admin console is required."
+        return 1
+    fi
+
+    if [[ -z "$netskope_disable_password" ]]; then
+        write_log "No disable password is configured. Attempting uninstall without one (per the official doc's basic example) - this will fail if tamper protection / a required password is enforced for this tenant, which is the confirmed case on Windows for this customer."
+        "$NETSKOPE_UNINSTALLER" uninstall_me exit
+    else
+        write_log "Attempting uninstall with the configured disable password."
+        "$NETSKOPE_UNINSTALLER" uninstall_me "$netskope_disable_password"
+    fi
+
+    if wait_for_netskope_removed 90 15; then
+        write_log "Netskope client uninstalled successfully."
+        return 0
+    else
+        write_log "Netskope client is still present after the uninstall attempt."
+        write_log "This could mean: (1) the System Extension isn't marked Removable in Intune yet, so removal is waiting on an interactive credential-approval prompt that never happened in this non-interactive script run, (2) the configured password doesn't match this tenant's disable password, or (3) removal requires an action from the Netskope admin console."
+        return 1
+    fi
+}
+# --- End Netskope handling ---------------------------------------------
 
 # Main script execution
 require_root
@@ -334,6 +436,13 @@ PRELOGON_MACHINE_CERT_PASSWORD="123456789"
 
 PORTAL_FQDN="tepl.gpcloudservice.com"
 
+# NEEDS CONFIRMATION: this reuses the same Netskope tamper-protection
+# disable password already confirmed for Windows (org-wide, per-tenant,
+# not per-device or per-OS) - Netskope's disable password is a tenant-
+# level setting, so it very likely applies here too, but that has not
+# been independently confirmed for macOS specifically.
+NETSKOPE_DISABLE_PASSWORD="June@2026!@"
+
 install_certificates \
     "$TRUSTED_ROOT_CERT_FILE" \
     "$DECRYPTION_CERT_FILE" \
@@ -348,7 +457,7 @@ install_globalprotect "$GLOBALPROTECT_INSTALLER_PATH"
 configure_globalprotect_portal "$PORTAL_FQDN"
 
 if wait_for_globalprotect_connected 300 10; then
-    uninstall_netskope_agent
+    uninstall_netskope_agent "$NETSKOPE_DISABLE_PASSWORD"
 else
     write_log "Skipping Netskope handling because GlobalProtect connectivity could not be verified. Re-run this script once GlobalProtect is confirmed connected."
 fi
