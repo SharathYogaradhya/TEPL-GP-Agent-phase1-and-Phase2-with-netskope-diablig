@@ -1,5 +1,7 @@
 # Phase2 Package (macOS)
 
+Lives under `macOS/Phase2 Package` in the repo — same folder name and internal layout as the Windows `Phase2 Package`, just under a `macOS/` parent so the two platforms don't mix at the repo root.
+
 Self-contained macOS deployment package for Phase2: everything Phase1 (macOS) does, plus Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity check, and Netskope handling once connectivity is confirmed — mirroring the Windows Phase2 scope and structure. Uses `TEPL Phase2 macOS-v1.sh`, the first macOS version.
 
 ## Read this before using it — this is a first draft with real gaps, not a finished port
@@ -16,7 +18,7 @@ Three very different confidence levels are stacked in this one script. Please re
 
 ## Deployment
 
-1. Copy this entire `Phase2 Package (macOS)` folder anywhere on the target Mac.
+1. Copy this entire `Phase2 Package` folder anywhere on the target Mac.
 2. Place the real GlobalProtect macOS installer package in `Installation File/`.
 3. Run as root: `sudo "./Phase2 Script/TEPL Phase2 macOS-v1.sh"`
 4. Watch progress / verify success in `Installation Logs/PANW-Phase2-Logs.txt`.

@@ -1,5 +1,7 @@
 # Phase1 Package (macOS)
 
+Lives under `macOS/Phase1 Package` in the repo — same folder name and internal layout as the Windows `Phase1 Package`, just under a `macOS/` parent so the two platforms don't mix at the repo root.
+
 Self-contained macOS deployment package for Phase1: install certificates + the GlobalProtect agent. No Netskope handling, no Portal/Prelogon connect configuration — that is Phase2's job, mirroring the Windows package split exactly. Uses `TEPL Phase1 macOS-v1.sh`, the first macOS version.
 
 ## Read this before using it: confidence levels
@@ -14,7 +16,7 @@ This is a **first draft, not yet run on a real Mac**. It was built and tested th
 
 ## Deployment
 
-1. Copy this entire `Phase1 Package (macOS)` folder anywhere on the target Mac — the folder can be named or placed anywhere, since the script resolves its own certs/installer relative to its own location, not a hardcoded path.
+1. Copy this entire `Phase1 Package` folder anywhere on the target Mac — the folder can be named or placed anywhere, since the script resolves its own certs/installer relative to its own location, not a hardcoded path.
 2. Place the real GlobalProtect macOS installer package in `Installation File/`, named to match `GLOBALPROTECT_INSTALLER_PATH` in the script (or update that variable to match the real filename).
 3. Run as root: `sudo "./Phase1 Script/TEPL Phase1 macOS-v1.sh"`
 4. Watch progress / verify success in `Installation Logs/PANW-Phase1-Logs.txt`.
