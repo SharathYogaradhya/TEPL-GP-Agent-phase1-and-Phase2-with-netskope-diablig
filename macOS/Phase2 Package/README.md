@@ -2,7 +2,7 @@
 
 Lives under `macOS/Phase2 Package` in the repo — same folder name and internal layout as the Windows `Phase2 Package`, just under a `macOS/` parent so the two platforms don't mix at the repo root.
 
-Self-contained macOS deployment package for Phase2: everything Phase1 (macOS) does, plus Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity check, and Netskope handling once connectivity is confirmed — mirroring the Windows Phase2 scope and structure. Uses `TEPL Phase2 macOS-v3.sh`.
+Self-contained macOS deployment package for Phase2: everything Phase1 (macOS) does, plus Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity check, and Netskope handling once connectivity is confirmed — mirroring the Windows Phase2 scope and structure. Uses `TEPL Phase2 macOS-v4.sh`.
 
 ## Read this before using it — real gaps remain, not a finished port
 
@@ -12,9 +12,17 @@ Different confidence levels are stacked in this one script. Please read this tab
 |---|---|---|
 | Certificate install + GlobalProtect install | **High** — identical, tested logic to Phase1 macOS v2, verified against the real `TEPL-PreLogon-MachineCert.pfx`. | Already using the real `.pkg` filename (`GlobalProtect-6.2.8-c948.pkg`). |
 | Netskope handling | **Medium — implemented from Netskope's own official documentation** ("Uninstalling the Netskope Client", macOS section), not guessed. Install path and uninstaller invocation are directly sourced from that doc. | Two things from that same doc are still unconfirmed: (1) your Intune tenant needs a macOS Configuration Profile marking Netskope's System Extension "Removable" (Team ID `24W52P9M7W`) — without it, uninstall may hit an interactive credential prompt instead of running silently; (2) the doc itself gives two different spellings of the System Extension bundle ID in different sections — confirm the real one with `systemextensionsctl list` on an installed Mac. |
-| Portal/Prelogon plist configuration | **Low — unverified.** The plist domain (`/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings`) and key structure are a best-effort guess based on the general pattern GlobalProtect macOS deployments are documented to use, not confirmed against a real installation or cross-checked against current official Palo Alto docs in this session. | If the domain/keys are wrong, this **silently writes to a plist GlobalProtect never reads** — it won't error, it just won't do anything. Watch for this specifically: certs + GP install succeeding is not evidence this part worked. |
+| Portal/Prelogon plist configuration | **Low-Medium — write mechanism now verified correct, file path/key structure still unconfirmed.** v4 writes a complete plist file directly to `/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings.plist`, validated with both `xmllint` (well-formed XML) and Python's `plistlib` (parses to the exact expected nested dict). The file path and key structure themselves are still a best-effort guess based on the general pattern GlobalProtect macOS deployments are documented to use — not confirmed against a real installation or current official Palo Alto docs. | If the path/keys are wrong, this **silently writes a plist GlobalProtect never reads** — it won't error, it just won't do anything. Watch for this specifically: certs + GP install succeeding is not evidence this part worked. (v1-v3 had a second, now-fixed problem on top of this: the write command itself was broken — see "New in v4" below.) |
 | GlobalProtect background service restart | **Low — unverified.** `com.paloaltonetworks.gp.pangps` is a guessed LaunchDaemon label. | If wrong, the restart step logs a clear failure message (it doesn't fail silently), but the config change (even if written correctly) won't take effect until the service actually restarts. |
 | GlobalProtect connectivity check | **Medium.** Scans all `utun*` interfaces for one with an IP inside `10.173.0.0/16`, rather than trying to match a specific interface name (since utun numbering isn't predictable and other VPN clients use utun too). Logic is sound and tested with a mocked `ifconfig`; not confirmed against a real connected session. | If GlobalProtect's real tunnel interface doesn't get an IP in this exact range, or another VPN's utun interface happens to match, this will misreport. |
+
+## New in v4 — fixed a broken plist-write mechanism
+
+Found by re-checking the actual command being used, prompted by a direct question about what plist the script writes to. v1-v3's `configure_globalprotect_portal()` built the Portal/Prelogon settings using `defaults write <domain> <key> -dict-add <subkey> <value>`, passing a whole `<dict>...</dict>` XML block as `<value>`. That's not how `-dict-add` works: it treats `<value>` as a **plain string**, not nested plist structure — so the command would have stored the literal XML text as a string value, never actually creating the nested `Portal`/`Prelogon` keys GlobalProtect would need to read, regardless of whether the domain/key names were otherwise right.
+
+v4 replaces this with writing a complete, self-contained plist XML file directly to disk via heredoc — no incremental `defaults`/`PlistBuddy` calls at all. This was verified two independent ways against the real, unmodified function: `xmllint --noout` confirms the generated file is well-formed XML, and Python's `plistlib.load()` confirms it parses to the exact expected structure — `{'Palo Alto Networks': {'GlobalProtect': {'PanSetup': {'Portal': 'tepl.gpcloudservice.com', 'Prelogon': 1}}}}` — with explicit checks on both the Portal string and the Prelogon integer. A full end-to-end run of the real v4 script also correctly failed with a clear log message when pointed at this Linux sandbox (which has no `/Library/Preferences/` directory at all — an expected environment limitation, not a script bug), while every other stage of the pipeline continued working normally around it.
+
+The file path itself (`/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings.plist`) and its key structure remain an unconfirmed guess — see the confidence table above. What's now fixed is that *if* that path/structure turns out correct, the write mechanism itself will actually produce a real, readable plist instead of silently doing nothing useful.
 
 ## New in v3 — fixed a real cross-platform openssl risk
 
@@ -34,7 +42,7 @@ Verified against the real, unmodified function with 5 mock scenarios (not instal
 ## Deployment
 
 1. Copy this entire `Phase2 Package` folder anywhere on the target Mac.
-2. Run as root: `sudo "./Phase2 Script/TEPL Phase2 macOS-v3.sh"`
+2. Run as root: `sudo "./Phase2 Script/TEPL Phase2 macOS-v4.sh"`
 3. Watch progress / verify success in `Installation Logs/PANW-Phase2-Logs.txt`.
 
 ## Contents
@@ -52,7 +60,7 @@ Verified against the real, unmodified function with 5 mock scenarios (not instal
 ├── Installation Logs/
 │   └── (created by the script on first run)
 └── Phase2 Script/
-    └── TEPL Phase2 macOS-v3.sh
+    └── TEPL Phase2 macOS-v4.sh
 ```
 
 ## What the script does, in order
@@ -76,6 +84,8 @@ In priority order:
 
 ## Testing performed
 
-Same approach as Phase1 macOS and every Windows script version: the real, unmodified script run against mocked `security`/`installer`/`launchctl`/`defaults`/`ifconfig`, plus real `openssl` for fingerprinting and real CIDR-range arithmetic (unit-tested in isolation with 6 boundary cases). Scenarios covered: full end-to-end run with GlobalProtect already connected (confirms the whole pipeline wires together correctly), GlobalProtect not connected (confirms Netskope is correctly skipped), the Portal/Prelogon configuration function running without crashing, and 5 Netskope-specific scenarios (not installed, successful uninstall, stuck/uninstaller-does-nothing, missing uninstaller binary, no password configured). All passed.
+Same approach as Phase1 macOS and every Windows script version: the real, unmodified script run against mocked `security`/`installer`/`launchctl`/`ifconfig`, plus real `openssl` for fingerprinting and real CIDR-range arithmetic (unit-tested in isolation with 6 boundary cases). Scenarios covered: full end-to-end run with GlobalProtect already connected (confirms the whole pipeline wires together correctly), GlobalProtect not connected (confirms Netskope is correctly skipped), and 5 Netskope-specific scenarios (not installed, successful uninstall, stuck/uninstaller-does-nothing, missing uninstaller binary, no password configured). All passed.
+
+For v4's plist-write mechanism specifically: the real, unmodified `configure_globalprotect_portal` function was run against a writable test path and its output validated two independent ways — `xmllint --noout` (well-formed XML) and Python's `plistlib.load()` (parses to the exact expected nested dict, with explicit assertions on both the Portal string and the Prelogon integer). A full end-to-end run of the real v4 script correctly logged a clear failure at the plist-write step when run in this Linux sandbox (no `/Library/Preferences/` directory exists here — an expected environment limitation, not a script bug), while every other stage of the pipeline continued working normally around it.
 
 **Not tested:** whether the plist configuration or service restart actually affects a real GlobalProtect installation, whether the connectivity check correctly identifies a real GlobalProtect tunnel versus another VPN's utun interface, and whether the documented Netskope uninstall command actually works against a real Netskope Mac client without the Intune Removable System Extension profile in place.

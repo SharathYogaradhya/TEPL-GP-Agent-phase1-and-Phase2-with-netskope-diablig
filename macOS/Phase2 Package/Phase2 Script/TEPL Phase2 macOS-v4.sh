@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# TEPL Phase2 macOS v3
+# TEPL Phase2 macOS v4
 #
 # Everything Phase1 macOS does (certs + GlobalProtect install), plus
 # Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity
@@ -18,10 +18,13 @@
 #   Confirmed against the real TEPL-PreLogon-MachineCert.pfx that it
 #   doesn't even need -legacy in the first place.
 # - Portal/Prelogon plist configuration: best-effort, based on documented
-#   GlobalProtect macOS deployment patterns, but the exact plist domain
-#   and key names are NOT verified against a real installation or
-#   official Palo Alto documentation in this session - see the
-#   "NEEDS CONFIRMATION" markers below.
+#   GlobalProtect macOS deployment patterns, but the exact plist file path
+#   and key names are NOT verified against a real installation or official
+#   Palo Alto documentation in this session - see the "NEEDS CONFIRMATION"
+#   markers below. Changed in v4: writes the plist as a complete XML file
+#   instead of via `defaults write ... -dict-add`, which does not actually
+#   build nested plist structure the way v3 assumed - see that function's
+#   own comment for what was wrong with it.
 # - GlobalProtect connectivity check: best-effort utun-interface + CIDR
 #   scan, conceptually mirroring the Windows adapter-description + IP
 #   range check, but the exact interface identification needs real-
@@ -238,35 +241,59 @@ install_globalprotect() {
 #
 # Windows Phase2 writes Portal/Prelogon values to the registry (HKCU and
 # HKLM). The macOS equivalent GlobalProtect reads is documented (by Palo
-# Alto Networks) as a preset plist under /Library/Preferences - this
-# implementation targets that mechanism via `defaults write`, but the
-# EXACT plist domain and key path below have not been verified against a
-# real GlobalProtect macOS installation or cross-checked against current
+# Alto Networks) as a preset plist under /Library/Preferences - the EXACT
+# plist file path and key structure below have NOT been verified against
+# a real GlobalProtect macOS installation or cross-checked against current
 # official Palo Alto documentation in this session. Confirm before relying
-# on this - if the domain/keys are wrong, this will silently write to a
-# plist GlobalProtect never reads, rather than fail loudly.
-GP_SETTINGS_PLIST_DOMAIN="/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings" # NEEDS CONFIRMATION
+# on this - if the path/keys are wrong, this will silently write a plist
+# GlobalProtect never reads, rather than fail loudly.
+GP_SETTINGS_PLIST_FILE="/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings.plist" # NEEDS CONFIRMATION
 
+# Changed in v4: writes the plist as a complete, self-contained XML file
+# instead of trying to build nested structure with `defaults write ...
+# -dict-add`. That command's -dict-add treats its value as a plain string,
+# not nested plist structure - passing a whole <dict>...</dict> XML block
+# as that string would have stored the literal XML text as a single
+# string value, not created real Portal/Prelogon keys at all, regardless
+# of whether the domain/key names above turn out to be correct. Writing
+# the full file directly is something that can actually be verified for
+# correctness (valid plist XML) without a real Mac to test tool-specific
+# incremental-edit semantics (defaults/PlistBuddy quoting and dict
+# auto-creation rules) against. The tradeoff: this replaces the entire
+# file rather than merging into it, which would only matter if this file
+# already holds unrelated settings - plausible if the domain/path above
+# turns out to be wrong, but this is meant to be a dedicated bootstrap
+# "preset" file, not GlobalProtect's live runtime settings.
 configure_globalprotect_portal() {
     local portal_fqdn="$1"
 
-    write_log "Configuring GlobalProtect Portal/Prelogon settings (plist domain: $GP_SETTINGS_PLIST_DOMAIN - NEEDS CONFIRMATION)..."
+    write_log "Configuring GlobalProtect Portal/Prelogon settings (plist file: $GP_SETTINGS_PLIST_FILE - NEEDS CONFIRMATION)..."
 
-    if defaults write "$GP_SETTINGS_PLIST_DOMAIN" "Palo Alto Networks" -dict-add "GlobalProtect" "$(cat <<PLIST
+    if cat > "$GP_SETTINGS_PLIST_FILE" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
 <dict>
-    <key>PanSetup</key>
-    <dict>
-        <key>Portal</key>
-        <string>${portal_fqdn}</string>
-        <key>Prelogon</key>
-        <integer>1</integer>
-    </dict>
+	<key>Palo Alto Networks</key>
+	<dict>
+		<key>GlobalProtect</key>
+		<dict>
+			<key>PanSetup</key>
+			<dict>
+				<key>Portal</key>
+				<string>${portal_fqdn}</string>
+				<key>Prelogon</key>
+				<integer>1</integer>
+			</dict>
+		</dict>
+	</dict>
 </dict>
+</plist>
 PLIST
-)" 2>/dev/null; then
-        write_log "GlobalProtect Portal/Prelogon plist values written (pending confirmation this is the correct domain/key structure)."
+    then
+        write_log "GlobalProtect Portal/Prelogon plist written (pending confirmation this is the correct file path and key structure)."
     else
-        write_log "Could not write GlobalProtect Portal/Prelogon plist values - this needs a confirmed domain/key structure before it will work. See the NEEDS CONFIRMATION note on GP_SETTINGS_PLIST_DOMAIN."
+        write_log "Could not write the GlobalProtect Portal/Prelogon plist file at $GP_SETTINGS_PLIST_FILE - check permissions and that the parent directory exists."
     fi
 
     # Restart the GlobalProtect background service so it picks up the
