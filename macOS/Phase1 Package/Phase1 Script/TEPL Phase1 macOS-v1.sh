@@ -249,9 +249,8 @@ TRUSTED_ROOT_CERT_FILE="$PACKAGE_ROOT/Certificates/TEPL-Root-CA.pem"
 DECRYPTION_CERT_FILE="$PACKAGE_ROOT/Certificates/Forward-Trust-CA.pem"
 SECOND_DECRYPTION_CERT_FILE="$PACKAGE_ROOT/Certificates/Forward-Trust-CA-ECDSA.pem"
 CERT_PASSWORD="123456789"
-# NEEDS CONFIRMATION: filename of the actual GlobalProtect macOS installer
-# package once provided - "GlobalProtect.pkg" is a placeholder name.
-GLOBALPROTECT_INSTALLER_PATH="$PACKAGE_ROOT/Installation File/GlobalProtect.pkg"
+# Confirmed 2026-09-23: the real GlobalProtect macOS installer filename.
+GLOBALPROTECT_INSTALLER_PATH="$PACKAGE_ROOT/Installation File/GlobalProtect-6.2.8-c948.pkg"
 
 # Prelogon Root CA + Machine certificate, needed for GlobalProtect Prelogon
 # machine-certificate authentication - same certs as Windows Phase1, since
