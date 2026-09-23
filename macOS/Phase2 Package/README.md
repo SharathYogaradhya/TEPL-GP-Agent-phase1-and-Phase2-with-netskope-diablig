@@ -2,7 +2,7 @@
 
 Lives under `macOS/Phase2 Package` in the repo — same folder name and internal layout as the Windows `Phase2 Package`, just under a `macOS/` parent so the two platforms don't mix at the repo root.
 
-Self-contained macOS deployment package for Phase2: everything Phase1 (macOS) does, plus Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity check, and Netskope handling once connectivity is confirmed — mirroring the Windows Phase2 scope and structure. Uses `TEPL Phase2 macOS-v2.sh`.
+Self-contained macOS deployment package for Phase2: everything Phase1 (macOS) does, plus Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity check, and Netskope handling once connectivity is confirmed — mirroring the Windows Phase2 scope and structure. Uses `TEPL Phase2 macOS-v3.sh`.
 
 ## Read this before using it — real gaps remain, not a finished port
 
@@ -10,11 +10,15 @@ Different confidence levels are stacked in this one script. Please read this tab
 
 | Part | Confidence | What could go wrong |
 |---|---|---|
-| Certificate install + GlobalProtect install | **High** — identical, tested logic to Phase1 macOS. | Already using the real `.pkg` filename (`GlobalProtect-6.2.8-c948.pkg`). |
+| Certificate install + GlobalProtect install | **High** — identical, tested logic to Phase1 macOS v2, verified against the real `TEPL-PreLogon-MachineCert.pfx`. | Already using the real `.pkg` filename (`GlobalProtect-6.2.8-c948.pkg`). |
 | Netskope handling | **Medium — implemented from Netskope's own official documentation** ("Uninstalling the Netskope Client", macOS section), not guessed. Install path and uninstaller invocation are directly sourced from that doc. | Two things from that same doc are still unconfirmed: (1) your Intune tenant needs a macOS Configuration Profile marking Netskope's System Extension "Removable" (Team ID `24W52P9M7W`) — without it, uninstall may hit an interactive credential prompt instead of running silently; (2) the doc itself gives two different spellings of the System Extension bundle ID in different sections — confirm the real one with `systemextensionsctl list` on an installed Mac. |
 | Portal/Prelogon plist configuration | **Low — unverified.** The plist domain (`/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings`) and key structure are a best-effort guess based on the general pattern GlobalProtect macOS deployments are documented to use, not confirmed against a real installation or cross-checked against current official Palo Alto docs in this session. | If the domain/keys are wrong, this **silently writes to a plist GlobalProtect never reads** — it won't error, it just won't do anything. Watch for this specifically: certs + GP install succeeding is not evidence this part worked. |
 | GlobalProtect background service restart | **Low — unverified.** `com.paloaltonetworks.gp.pangps` is a guessed LaunchDaemon label. | If wrong, the restart step logs a clear failure message (it doesn't fail silently), but the config change (even if written correctly) won't take effect until the service actually restarts. |
 | GlobalProtect connectivity check | **Medium.** Scans all `utun*` interfaces for one with an IP inside `10.173.0.0/16`, rather than trying to match a specific interface name (since utun numbering isn't predictable and other VPN clients use utun too). Logic is sound and tested with a mocked `ifconfig`; not confirmed against a real connected session. | If GlobalProtect's real tunnel interface doesn't get an IP in this exact range, or another VPN's utun interface happens to match, this will misreport. |
+
+## New in v3 — fixed a real cross-platform openssl risk
+
+v1/v2's certificate fingerprint check hardcoded the OpenSSL 3.x `-legacy` flag when reading the Prelogon Machine cert's `.pfx`. macOS ships **LibreSSL** as its default system `openssl`, which doesn't recognize that flag at all — on a stock Mac this could have made the fingerprint check fail outright and abort certificate installation entirely. Testing directly against the real `TEPL-PreLogon-MachineCert.pfx` also showed it doesn't even need `-legacy` in the first place. v3 tries the extraction without `-legacy` first, falling back to it only if that produces nothing — works regardless of which `openssl` ends up in `PATH`.
 
 ## New in v2 — real Netskope uninstall logic, sourced from Netskope's official documentation
 
@@ -30,7 +34,7 @@ Verified against the real, unmodified function with 5 mock scenarios (not instal
 ## Deployment
 
 1. Copy this entire `Phase2 Package` folder anywhere on the target Mac.
-2. Run as root: `sudo "./Phase2 Script/TEPL Phase2 macOS-v2.sh"`
+2. Run as root: `sudo "./Phase2 Script/TEPL Phase2 macOS-v3.sh"`
 3. Watch progress / verify success in `Installation Logs/PANW-Phase2-Logs.txt`.
 
 ## Contents
@@ -48,7 +52,7 @@ Verified against the real, unmodified function with 5 mock scenarios (not instal
 ├── Installation Logs/
 │   └── (created by the script on first run)
 └── Phase2 Script/
-    └── TEPL Phase2 macOS-v2.sh
+    └── TEPL Phase2 macOS-v3.sh
 ```
 
 ## What the script does, in order

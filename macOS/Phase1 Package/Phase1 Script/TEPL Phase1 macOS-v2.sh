@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# TEPL Phase1 macOS v1
+# TEPL Phase1 macOS v2
 #
 # Installs TEPL certs (Root CA + 2 decryption certs) + Prelogon certs (Root
 # CA + Machine cert with private key) + the GlobalProtect agent. Mirrors
@@ -14,6 +14,13 @@
 # - "Already installed?" and "already present?" checks use `pkgutil`/app
 #   bundle existence and certificate fingerprint comparison, instead of the
 #   Windows registry.
+#
+# Changed in v2: get_cert_fingerprint no longer hardcodes the OpenSSL 3.x
+# "-legacy" flag when reading the Prelogon Machine cert's PKCS#12 bundle -
+# it tries without it first (needed for LibreSSL, macOS's default system
+# openssl, which doesn't recognize that flag at all) and only falls back
+# to -legacy if that produced nothing. See that function's own comment for
+# the real-cert testing behind this.
 #
 # NEEDS CONFIRMATION before relying on this in production - see the
 # "NEEDS CONFIRMATION" markers below and the README for the full list.
@@ -78,19 +85,40 @@ wait_for_condition() {
 # file. Handles both a plain certificate (.pem/.der/.crt, no private key)
 # and a PKCS#12 bundle (.pfx/.p12, cert + private key, needs a password to
 # open) by extracting the leaf certificate from the PKCS#12 bundle first.
+#
+# Changed in v2: tries the PKCS#12 extraction WITHOUT the OpenSSL 3.x
+# "-legacy" provider flag first, falling back to it only if that produced
+# nothing. v1 always passed -legacy - but macOS ships LibreSSL as its
+# system `openssl` by default, which does not recognize that flag at all
+# (unlike OpenSSL 3.x, where -legacy enables support for older PKCS12
+# encryption ciphers). Testing directly against the real
+# TEPL-PreLogon-MachineCert.pfx confirmed it doesn't even need -legacy in
+# the first place - it extracts cleanly without it - so the old hardcoded
+# -legacy was both unnecessary for this cert and a real risk of erroring
+# out entirely on LibreSSL. Trying both means this works regardless of
+# which openssl actually ends up in PATH on the target Mac.
 get_cert_fingerprint() {
     local cert_file="$1"
     local password="${2:-}"
 
-    # Uses `cut -d'=' -f2` rather than matching the literal "SHA1
-    # Fingerprint=" label text, since that label's casing/wording differs
-    # between OpenSSL and LibreSSL builds (macOS's bundled openssl has
-    # varied across versions) - splitting on '=' is robust to that.
     if [[ "$cert_file" == *.pfx || "$cert_file" == *.p12 ]]; then
-        openssl pkcs12 -in "$cert_file" -passin "pass:${password}" -nokeys -clcerts -legacy 2>/dev/null \
+        local fp
+        fp=$(openssl pkcs12 -in "$cert_file" -passin "pass:${password}" -nokeys -clcerts 2>/dev/null \
             | openssl x509 -noout -fingerprint -sha1 2>/dev/null \
-            | cut -d'=' -f2 | tr -d ':'
+            | cut -d'=' -f2 | tr -d ':')
+
+        if [[ -z "$fp" ]]; then
+            fp=$(openssl pkcs12 -in "$cert_file" -passin "pass:${password}" -nokeys -clcerts -legacy 2>/dev/null \
+                | openssl x509 -noout -fingerprint -sha1 2>/dev/null \
+                | cut -d'=' -f2 | tr -d ':')
+        fi
+
+        echo "$fp"
     else
+        # Uses `cut -d'=' -f2` rather than matching the literal "SHA1
+        # Fingerprint=" label text, since that label's casing/wording
+        # differs between OpenSSL and LibreSSL builds - splitting on '='
+        # is robust to that.
         openssl x509 -in "$cert_file" -noout -fingerprint -sha1 2>/dev/null \
             | cut -d'=' -f2 | tr -d ':'
     fi

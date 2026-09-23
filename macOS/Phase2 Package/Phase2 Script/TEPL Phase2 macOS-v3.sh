@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# TEPL Phase2 macOS v2
+# TEPL Phase2 macOS v3
 #
 # Everything Phase1 macOS does (certs + GlobalProtect install), plus
 # Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity
@@ -9,8 +9,14 @@
 #
 # CONFIDENCE LEVELS (read this before using this script):
 # - Certificates + GlobalProtect install: same mechanism as Phase1 macOS
-#   v1, tested via a mocked harness (see Task tracking / commit history).
-#   Confident this logic is correct; not yet run on a real Mac.
+#   v2, tested via a mocked harness (see Task tracking / commit history).
+#   Confident this logic is correct; not yet run on a real Mac. Changed in
+#   v3: get_cert_fingerprint no longer hardcodes the OpenSSL "-legacy"
+#   flag for the Prelogon Machine cert's PKCS#12 bundle - it tries without
+#   it first (needed for LibreSSL, macOS's default system openssl, which
+#   doesn't recognize that flag) and falls back to it only if needed.
+#   Confirmed against the real TEPL-PreLogon-MachineCert.pfx that it
+#   doesn't even need -legacy in the first place.
 # - Portal/Prelogon plist configuration: best-effort, based on documented
 #   GlobalProtect macOS deployment patterns, but the exact plist domain
 #   and key names are NOT verified against a real installation or
@@ -83,18 +89,35 @@ wait_for_condition() {
     eval "$condition"
 }
 
-# --- Certificate + GlobalProtect install (identical to Phase1 macOS v1;
+# --- Certificate + GlobalProtect install (identical to Phase1 macOS v2;
 # kept as a separate copy in this file rather than shared, matching the
 # Windows Phase1/Phase2 convention of two independently maintained files) -
 
+# Changed in v3: tries the PKCS#12 extraction WITHOUT the OpenSSL 3.x
+# "-legacy" provider flag first, falling back to it only if that produced
+# nothing. Earlier versions always passed -legacy - but macOS ships
+# LibreSSL as its system `openssl` by default, which does not recognize
+# that flag at all. Testing directly against the real
+# TEPL-PreLogon-MachineCert.pfx confirmed it doesn't even need -legacy in
+# the first place, so the old hardcoded -legacy was both unnecessary and a
+# real risk of erroring out entirely on LibreSSL.
 get_cert_fingerprint() {
     local cert_file="$1"
     local password="${2:-}"
 
     if [[ "$cert_file" == *.pfx || "$cert_file" == *.p12 ]]; then
-        openssl pkcs12 -in "$cert_file" -passin "pass:${password}" -nokeys -clcerts -legacy 2>/dev/null \
+        local fp
+        fp=$(openssl pkcs12 -in "$cert_file" -passin "pass:${password}" -nokeys -clcerts 2>/dev/null \
             | openssl x509 -noout -fingerprint -sha1 2>/dev/null \
-            | cut -d'=' -f2 | tr -d ':'
+            | cut -d'=' -f2 | tr -d ':')
+
+        if [[ -z "$fp" ]]; then
+            fp=$(openssl pkcs12 -in "$cert_file" -passin "pass:${password}" -nokeys -clcerts -legacy 2>/dev/null \
+                | openssl x509 -noout -fingerprint -sha1 2>/dev/null \
+                | cut -d'=' -f2 | tr -d ':')
+        fi
+
+        echo "$fp"
     else
         openssl x509 -in "$cert_file" -noout -fingerprint -sha1 2>/dev/null \
             | cut -d'=' -f2 | tr -d ':'
