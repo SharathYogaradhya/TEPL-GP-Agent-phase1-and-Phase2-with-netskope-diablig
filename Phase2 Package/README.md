@@ -1,13 +1,13 @@
 # Phase2 Package
 
-Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v24.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
+Self-contained deployment package for Phase2 (certificates + GlobalProtect + Portal/Prelogon auto-connect config + Netskope uninstall once GlobalProtect is confirmed connected). Uses `TEPL Phase2 Windows-Final-v25.ps1`, the current latest version. Fully self-contained: the `GlobalProtect64.msi` installer is bundled in already, and the Netskope logic is inlined directly into the script — no separate `Netskope-Functions-*.ps1` file to place.
 
-**v24 fixes a critical safety-gate bug that let Netskope be uninstalled with no working GlobalProtect connection — read the "New in v24" section below before deploying any earlier version.**
+**v24 fixes a critical safety-gate bug that let Netskope be uninstalled with no working GlobalProtect connection, and v25 fixes a real regression that broke GlobalProtect's zero-click auto-connect — read both "New in" sections below before deploying any earlier version.**
 
 ## Deployment
 
 1. Copy this entire `Phase2 Package` folder anywhere on the target machine — **the folder can be named or placed anything**, it no longer has to be `C:\PaloAlto Package\`. The script finds its own certs/MSI relative to its own location (`$PSScriptRoot`), not a hardcoded path.
-2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v24.ps1` as Administrator.
+2. Run `Phase2 Script\TEPL Phase2 Windows-Final-v25.ps1` as Administrator.
 3. Watch progress / verify success in `Installation Logs\PANW-Phase2-Logs.txt` (created inside this same folder).
 
 Netskope is only disabled/uninstalled once the script confirms GlobalProtect is actually connected (PanGPS running + tunnel adapter up + tunnel IP in `10.173.0.0/16`), waiting up to 5 minutes for that to happen (300 seconds, polling every 10s) to allow time for an interactive SSO/MFA login if the portal requires one. If that can't be confirmed within that window, Netskope is left untouched and the script says so in the log — re-run once GlobalProtect connects.
@@ -29,8 +29,18 @@ After each uninstall attempt, it also polls for up to 90 seconds to confirm Nets
 ├── Installation Logs\
 │   └── PANW-Phase2-Logs.txt       (created by the script on first run)
 └── Phase2 Script\
-    └── TEPL Phase2 Windows-Final-v24.ps1
+    └── TEPL Phase2 Windows-Final-v25.ps1
 ```
+
+**New in v25 — reverts a v23 regression that broke GlobalProtect's zero-click auto-connect:** on the same 2026-09-24 customer call, with v24 in place and the Netskope safety gate now protecting the machine, GlobalProtect itself still would not auto-connect: the client relaunched with the Portal field correctly pre-filled, but sat on "Not Connected" waiting for a manual click. The customer confirmed a manual Connect click worked (a real tunnel came up) and that the Portal's Connect Method is confirmed **User-logon (Always On)** for this exact user/device pair — ruling out auth, network path, cert trust, and Portal config as the cause. The customer also confirmed this **used to work on an earlier version of this script**, before v23.
+
+Diffing v22 against v23 confirmed the regression directly: v21/v22 always relaunched `PanGPA.exe` via a temporary Scheduled Task (`LogonType Interactive`, registered to the logged-on user), regardless of how the script itself was running. v23 introduced `Test-RunningAsSystem` and switched to a direct `Stop-Process` + `Start-Process` for any non-SYSTEM context (i.e. an admin running the script interactively - the exact scenario used in every real test so far) - based on a claim that direct-restart was the mechanism proven to work on a **different, unrelated prior project**. That generalization doesn't hold on this project: the customer's own before/after comparison shows Scheduled-Task launch worked here and direct restart doesn't.
+
+Likely mechanism: `Start-Process` from an elevated PowerShell session typically inherits that elevation, so a directly-restarted `PanGPA.exe` runs at High integrity (elevated) - whereas a Scheduled Task with `LogonType Interactive` launches it at the user's normal, non-elevated level, exactly like double-clicking the icon. GlobalProtect's Always On / user-session detection appears not to treat an elevated instance the same as a normal one.
+
+v25 reverts `Start-GlobalProtectClientForUser` to always use the Scheduled Task mechanism for every context, removing `Test-RunningAsSystem` entirely (it's no longer needed once both contexts use the same path). Verified against the real, unmodified function with a mocked Scheduled Task API: confirms `Register-ScheduledTask` is called with `LogonType Interactive` and the task actually runs, for the same interactive-admin scenario that was broken in v23/v24. The Netskope safety-gate fix from v24 was re-verified unchanged on top of this revert (both connected/not-connected scenarios still pass).
+
+**Still to confirm on the customer's machine**: that the Scheduled Task revert alone restores true zero-click auto-connect (worth testing directly, ideally via a genuine logoff/logon or network toggle rather than just an app relaunch, to be certain it's not also masking a separate first-time-login/Agent-Config-binding requirement noticed during this same session).
 
 **New in v24 — fixes a critical PowerShell truthiness bug that let Netskope be uninstalled with GlobalProtect never connected:** found on a real customer run (2026-09-24) where the log showed `Could not confirm GlobalProtect is connected ... within 300 seconds.` immediately followed by `Attempting to uninstall Netskope client...` — Netskope was removed from a machine with no working GlobalProtect tunnel at all, leaving it with neither.
 
@@ -71,7 +81,7 @@ While fixing this, `Install-GlobalProtect` was also brought up to the same stand
 
 Installs the GlobalProtect Prelogon Root CA certificate (`TEPL-PreLogon-CA.pem`, to the Trusted Root store) and the Prelogon Machine certificate (`TEPL-PreLogon-MachineCert.pfx`, to the Personal "My" store at both LocalMachine and CurrentUser) needed for Prelogon machine-certificate authentication. GlobalProtect fetches the cert from the machine (LocalMachine) store during the prelogon stage. The Machine cert must be a `.pfx` — a combined cert+encrypted-key `.pem` export was tested directly against this script's own certificate-loading code and loaded with `HasPrivateKey = False` (no error, but the private key silently dropped), so a plain `.pem`/`.der` export cannot be used for it.
 
-This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v24.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v24 in place.
+This package carries a copy of `Phase2 Script/TEPL Phase2 Windows-Final-v25.ps1` at the repo root — that original file is never modified. If a future version becomes the recommended one, update the copy in this package rather than editing v25 in place.
 
 ## Getting a click-free GlobalProtect connection
 
