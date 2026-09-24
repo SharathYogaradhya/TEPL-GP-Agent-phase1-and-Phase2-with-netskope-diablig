@@ -12,13 +12,36 @@ $packageRoot = Split-Path -Parent $PSScriptRoot
 $logFilePath = Join-Path $packageRoot "Installation Logs\PANW-Phase2-Logs.txt"
 
 # Function to log messages
+#
+# Changed in v24: Write-Output -> Write-Host. Write-Output puts its string
+# onto the CALLING function's own return pipeline, not just the console. Any
+# function that calls Write-Log one or more times before returning a
+# $true/$false therefore doesn't actually return a clean boolean - it returns
+# an array of [log strings..., real boolean]. PowerShell's truthiness rule for
+# arrays is: 0 elements = false, 1 element = that element's own truthiness,
+# 2+ elements = ALWAYS true, regardless of contents. Test-GlobalProtectConnected
+# calls Write-Log at least twice before returning, so `if (Test-GlobalProtectConnected ...)`
+# at the bottom of this script was unconditionally true on every run - the
+# "else" branch (skip Netskope handling because GlobalProtect isn't
+# connected) was dead code, 100% unreachable, regardless of actual tunnel
+# state. Confirmed on a real customer run on 2026-09-24: the log showed
+# "Could not confirm GlobalProtect is connected ... within 300 seconds."
+# immediately followed by "Attempting to uninstall Netskope client..." -
+# Netskope was removed with no working GlobalProtect tunnel, leaving the
+# device with neither. Reproduced directly against the real, unmodified
+# v23 Test-GlobalProtectConnected function (not a rewritten copy) before
+# this fix, and confirmed both outcomes (connected/not connected) branch
+# correctly after it. Write-Host writes straight to the console without
+# entering the pipeline at all, so it can no longer contaminate a caller's
+# return value - it still displays live and still reaches the log file via
+# Add-Content below, unchanged.
 function Write-Log {
     param (
         [string]$message
     )
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "$timestamp - $message"
-    Write-Output $logMessage
+    Write-Host $logMessage
     Add-Content -Path $logFilePath -Value $logMessage
 }
 
