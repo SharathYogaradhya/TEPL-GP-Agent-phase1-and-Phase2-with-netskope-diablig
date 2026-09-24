@@ -1,0 +1,91 @@
+# Phase2 Package (macOS)
+
+Lives under `macOS/Phase2 Package` in the repo — same folder name and internal layout as the Windows `Phase2 Package`, just under a `macOS/` parent so the two platforms don't mix at the repo root.
+
+Self-contained macOS deployment package for Phase2: everything Phase1 (macOS) does, plus Portal/Prelogon auto-connect configuration, a GlobalProtect connectivity check, and Netskope handling once connectivity is confirmed — mirroring the Windows Phase2 scope and structure. Uses `TEPL Phase2 macOS-v4.sh`.
+
+## Read this before using it — real gaps remain, not a finished port
+
+Different confidence levels are stacked in this one script. Please read this table before testing, since it determines what a failure actually means:
+
+| Part | Confidence | What could go wrong |
+|---|---|---|
+| Certificate install + GlobalProtect install | **High** — identical, tested logic to Phase1 macOS v2, verified against the real `TEPL-PreLogon-MachineCert.pfx`. | Already using the real `.pkg` filename (`GlobalProtect-6.2.8-c948.pkg`). |
+| Netskope handling | **Medium — implemented from Netskope's own official documentation** ("Uninstalling the Netskope Client", macOS section), not guessed. Install path and uninstaller invocation are directly sourced from that doc. | Two things from that same doc are still unconfirmed: (1) your Intune tenant needs a macOS Configuration Profile marking Netskope's System Extension "Removable" (Team ID `24W52P9M7W`) — without it, uninstall may hit an interactive credential prompt instead of running silently; (2) the doc itself gives two different spellings of the System Extension bundle ID in different sections — confirm the real one with `systemextensionsctl list` on an installed Mac. |
+| Portal/Prelogon plist configuration | **Low-Medium — write mechanism now verified correct, file path/key structure still unconfirmed.** v4 writes a complete plist file directly to `/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings.plist`, validated with both `xmllint` (well-formed XML) and Python's `plistlib` (parses to the exact expected nested dict). The file path and key structure themselves are still a best-effort guess based on the general pattern GlobalProtect macOS deployments are documented to use — not confirmed against a real installation or current official Palo Alto docs. | If the path/keys are wrong, this **silently writes a plist GlobalProtect never reads** — it won't error, it just won't do anything. Watch for this specifically: certs + GP install succeeding is not evidence this part worked. (v1-v3 had a second, now-fixed problem on top of this: the write command itself was broken — see "New in v4" below.) |
+| GlobalProtect background service restart | **Low — unverified.** `com.paloaltonetworks.gp.pangps` is a guessed LaunchDaemon label. | If wrong, the restart step logs a clear failure message (it doesn't fail silently), but the config change (even if written correctly) won't take effect until the service actually restarts. |
+| GlobalProtect connectivity check | **Medium.** Scans all `utun*` interfaces for one with an IP inside `10.173.0.0/16`, rather than trying to match a specific interface name (since utun numbering isn't predictable and other VPN clients use utun too). Logic is sound and tested with a mocked `ifconfig`; not confirmed against a real connected session. | If GlobalProtect's real tunnel interface doesn't get an IP in this exact range, or another VPN's utun interface happens to match, this will misreport. |
+
+## New in v4 — fixed a broken plist-write mechanism
+
+Found by re-checking the actual command being used, prompted by a direct question about what plist the script writes to. v1-v3's `configure_globalprotect_portal()` built the Portal/Prelogon settings using `defaults write <domain> <key> -dict-add <subkey> <value>`, passing a whole `<dict>...</dict>` XML block as `<value>`. That's not how `-dict-add` works: it treats `<value>` as a **plain string**, not nested plist structure — so the command would have stored the literal XML text as a string value, never actually creating the nested `Portal`/`Prelogon` keys GlobalProtect would need to read, regardless of whether the domain/key names were otherwise right.
+
+v4 replaces this with writing a complete, self-contained plist XML file directly to disk via heredoc — no incremental `defaults`/`PlistBuddy` calls at all. This was verified two independent ways against the real, unmodified function: `xmllint --noout` confirms the generated file is well-formed XML, and Python's `plistlib.load()` confirms it parses to the exact expected structure — `{'Palo Alto Networks': {'GlobalProtect': {'PanSetup': {'Portal': 'tepl.gpcloudservice.com', 'Prelogon': 1}}}}` — with explicit checks on both the Portal string and the Prelogon integer. A full end-to-end run of the real v4 script also correctly failed with a clear log message when pointed at this Linux sandbox (which has no `/Library/Preferences/` directory at all — an expected environment limitation, not a script bug), while every other stage of the pipeline continued working normally around it.
+
+The file path itself (`/Library/Preferences/com.paloaltonetworks.GlobalProtect.settings.plist`) and its key structure remain an unconfirmed guess — see the confidence table above. What's now fixed is that *if* that path/structure turns out correct, the write mechanism itself will actually produce a real, readable plist instead of silently doing nothing useful.
+
+## New in v3 — fixed a real cross-platform openssl risk
+
+v1/v2's certificate fingerprint check hardcoded the OpenSSL 3.x `-legacy` flag when reading the Prelogon Machine cert's `.pfx`. macOS ships **LibreSSL** as its default system `openssl`, which doesn't recognize that flag at all — on a stock Mac this could have made the fingerprint check fail outright and abort certificate installation entirely. Testing directly against the real `TEPL-PreLogon-MachineCert.pfx` also showed it doesn't even need `-legacy` in the first place. v3 tries the extraction without `-legacy` first, falling back to it only if that produces nothing — works regardless of which `openssl` ends up in `PATH`.
+
+## New in v2 — real Netskope uninstall logic, sourced from Netskope's official documentation
+
+Netskope's own "Uninstalling the Netskope Client" PDF (macOS section) confirmed:
+- **Install path**: `/Library/Application Support/Netskope Client.app` (from Netskope's own Kandji detection script — this script uses a direct path check instead of `mdfind`, testing the same thing without depending on Spotlight indexing).
+- **Uninstall command**: run the bundled uninstaller directly — `/Applications/Remove Netskope Client.app/Contents/MacOS/Remove Netskope Client uninstall_me <password>` — the macOS equivalent of Windows' `msiexec /x ... PASSWORD=...`.
+- **System Extension identity** (needed for an Intune "Removable System Extension" Configuration Profile — the functional equivalent of Windows tamper-protection bypass): Team Identifier `24W52P9M7W`. The doc gives two spellings of the Bundle Identifier across different sections (`com.netskope.client.Netskope-Client.NetskopeClientMacAppProxy` with a hyphen vs. `com.netskope.client.NetskopeClient.NetskopeClientMacAppProxy` without) — the script uses the Intune section's spelling, flagged for confirmation against a real installed Mac.
+
+The reused Windows disable password (`June@2026!@`) is plugged in as the default, since Netskope's disable password is a tenant-level setting rather than per-OS — but this hasn't been independently confirmed for macOS specifically.
+
+Verified against the real, unmodified function with 5 mock scenarios (not installed, successful uninstall, stuck/uninstaller-does-nothing, missing uninstaller binary, no password configured) — all pass, and the invocation arguments exactly match the official documentation's examples in both the password and no-password cases.
+
+## Deployment
+
+1. Copy this entire `Phase2 Package` folder anywhere on the target Mac.
+2. Run as root: `sudo "./Phase2 Script/TEPL Phase2 macOS-v4.sh"`
+3. Watch progress / verify success in `Installation Logs/PANW-Phase2-Logs.txt`.
+
+## Contents
+
+```
+<this folder, wherever you place it>/
+├── Certificates/
+│   ├── TEPL-Root-CA.pem
+│   ├── Forward-Trust-CA.pem
+│   ├── Forward-Trust-CA-ECDSA.pem
+│   ├── TEPL-PreLogon-CA.pem
+│   └── TEPL-PreLogon-MachineCert.pfx
+├── Installation File/
+│   └── GlobalProtect-6.2.8-c948.pkg
+├── Installation Logs/
+│   └── (created by the script on first run)
+└── Phase2 Script/
+    └── TEPL Phase2 macOS-v4.sh
+```
+
+## What the script does, in order
+
+1. Everything Phase1 macOS does: certs into the System keychain, GlobalProtect installed via `installer`.
+2. Writes Portal FQDN + Prelogon=1 to a preset plist (`configure_globalprotect_portal`) — **NEEDS CONFIRMATION**, see table above.
+3. Restarts the GlobalProtect background service via `launchctl kickstart` — **NEEDS CONFIRMATION** on the exact daemon label.
+4. Waits up to 5 minutes, polling every 10 seconds, for a `utun*` interface to show an IP inside `10.173.0.0/16` (the connectivity check).
+5. **Only if connected**: attempts the real Netskope uninstall (see "New in v2" above). **If not connected within 5 minutes**: skips straight to the final log message, same as Windows Phase2.
+
+## What needs to happen before this is production-ready
+
+In priority order:
+
+1. **Set up the Intune "Removable System Extension" Configuration Profile for Netskope** (Team ID `24W52P9M7W`) — without it, the uninstall command may hang waiting on an interactive credential prompt that a non-interactive script run will never satisfy.
+2. **Confirm the real System Extension Bundle Identifier** on an installed Mac via `systemextensionsctl list` — the official doc gives two different spellings.
+3. **Confirm the Portal/Prelogon plist domain and key structure** against either a real installation (inspect what GlobalProtect itself writes/reads after a manual connect) or current official Palo Alto Networks macOS deployment documentation.
+4. **Confirm the GlobalProtect LaunchDaemon label** (`launchctl list | grep -i paloalto` on a real installed machine will show the real label).
+5. **Confirm the Netskope disable password applies the same way on macOS** as it does on Windows (tenant-level setting, so likely yes, but not independently verified).
+6. **Test on a real Mac** — nothing beyond mocked-command logic testing has been done, the same caveat that applied to every Windows script version before its first real-hardware test.
+
+## Testing performed
+
+Same approach as Phase1 macOS and every Windows script version: the real, unmodified script run against mocked `security`/`installer`/`launchctl`/`ifconfig`, plus real `openssl` for fingerprinting and real CIDR-range arithmetic (unit-tested in isolation with 6 boundary cases). Scenarios covered: full end-to-end run with GlobalProtect already connected (confirms the whole pipeline wires together correctly), GlobalProtect not connected (confirms Netskope is correctly skipped), and 5 Netskope-specific scenarios (not installed, successful uninstall, stuck/uninstaller-does-nothing, missing uninstaller binary, no password configured). All passed.
+
+For v4's plist-write mechanism specifically: the real, unmodified `configure_globalprotect_portal` function was run against a writable test path and its output validated two independent ways — `xmllint --noout` (well-formed XML) and Python's `plistlib.load()` (parses to the exact expected nested dict, with explicit assertions on both the Portal string and the Prelogon integer). A full end-to-end run of the real v4 script correctly logged a clear failure at the plist-write step when run in this Linux sandbox (no `/Library/Preferences/` directory exists here — an expected environment limitation, not a script bug), while every other stage of the pipeline continued working normally around it.
+
+**Not tested:** whether the plist configuration or service restart actually affects a real GlobalProtect installation, whether the connectivity check correctly identifies a real GlobalProtect tunnel versus another VPN's utun interface, and whether the documented Netskope uninstall command actually works against a real Netskope Mac client without the Intune Removable System Extension profile in place.
